@@ -4,7 +4,7 @@ from telegram.ext import Application, MessageHandler, ContextTypes, filters
 import asyncio
 import re
 
-reminders = []  # (message, timestamp)
+reminders = []
 reminder_list_message_id = None
 reminder_list_chat_id = None
 message_log = []
@@ -177,7 +177,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.delete_message(chat_id=reminder_list_chat_id, message_id=reminder_list_message_id)
             except:
                 pass
-            reminder_list_message_id = None  # Keep data, just delete the message
+            reminder_list_message_id = None
 
         msg = await context.bot.send_message(chat_id=chat_id, text="🧹 Chat cleared. Reminders kept.")
         asyncio.create_task(delete_later(msg.message_id))
@@ -215,7 +215,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(delete_later(msg.message_id))
 
 
-# Replace with your bot token
+
 app = Application.builder().token("8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE").build()
 print("Bot is running...")
 
