@@ -4,23 +4,22 @@ from telegram.ext import Application, MessageHandler, ContextTypes, filters
 import asyncio
 import re
 
+# Store message IDs for deletion (optional enhancement)
+message_log = []
 
 async def start_timer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Timer started for 5 seconds...")
+    msg = await update.message.reply_text("Timer started for 5 seconds...")
+    message_log.append((update.effective_chat.id, msg.message_id))
     await asyncio.sleep(5)
-    await update.message.reply_text("⏰ Time's up!")
-
+    msg = await update.message.reply_text("⏰ Time's up!")
+    message_log.append((update.effective_chat.id, msg.message_id))
 
 async def send_scheduled_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message: str, delay_seconds: int):
     await asyncio.sleep(delay_seconds)
-    await context.bot.send_message(chat_id=chat_id, text=f"⏰ Reminder: {message}")
-
+    msg = await context.bot.send_message(chat_id=chat_id, text=f"⏰ Reminder: {message}")
+    message_log.append((chat_id, msg.message_id))
 
 def parse_time_prefix(text: str):
-    """
-    Parses formats like '1h20m10s reminder', '30s stretch', etc.
-    Returns (total_seconds, message) or (None, None) if no match.
-    """
     match = re.match(r'(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?\s+(.*)', text.strip())
     if match:
         hours = int(match.group(1)) if match.group(1) else 0
@@ -32,29 +31,40 @@ def parse_time_prefix(text: str):
             return total_seconds, message
     return None, None
 
-
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.lower()
     chat_id = update.effective_chat.id
+    msg_id = update.message.message_id
 
-    if "timer" in text:
-        asyncio.create_task(start_timer(update, context))
+    # Save message ID for later deletion
+    message_log.append((chat_id, msg_id))
 
-    elif "time" in text:
+    if "clear" in text:
+        # Attempt to delete all tracked messages in the chat
+        for cid, mid in message_log:
+            try:
+                await context.bot.delete_message(chat_id=cid, message_id=mid)
+            except Exception as e:
+                print(f"Failed to delete message {mid} in chat {cid}: {e}")
+        message_log.clear()
+        return
+
+    if "time" in text:
         now = datetime.now()
-        await update.message.reply_text(f"Current time: {now.strftime('%H:%M:%S')}")
+        msg = await update.message.reply_text(f"Current time: {now.strftime('%H:%M:%S')}")
+        message_log.append((chat_id, msg.message_id))
 
     else:
         delay_seconds, reminder_message = parse_time_prefix(text)
         if delay_seconds:
-            await update.message.reply_text(
+            msg = await update.message.reply_text(
                 f"⏳ Reminder set in {delay_seconds // 60} minutes{' and ' + str(delay_seconds % 60) + ' seconds' if delay_seconds % 60 else ''}!"
             )
+            message_log.append((chat_id, msg.message_id))
             asyncio.create_task(send_scheduled_message(context, chat_id, reminder_message, delay_seconds))
         else:
-            await update.message.reply_text("I didn’t understand that. Try 'timer', 'time', or '30m do something'.")
-
+            msg = await update.message.reply_text("I didn’t understand that. Try 'timer', 'time', or '30m do something'.")
+            message_log.append((chat_id, msg.message_id))
 
 # Replace your real token here
 app = Application.builder().token("8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE").build()
@@ -62,5 +72,4 @@ app = Application.builder().token("8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJR
 print("Bot is running...")
 
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
 app.run_polling()
