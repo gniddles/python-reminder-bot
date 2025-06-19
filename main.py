@@ -63,7 +63,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message_log.append((chat_id, msg.message_id))
             asyncio.create_task(send_scheduled_message(context, chat_id, reminder_message, delay_seconds))
         else:
-            msg = await update.message.reply_text("I didn’t understand that. Try 'timer', 'time', or '30m do something'.")
+            msg = await update.message.reply_text("I didn’t understand that. Try again.")
             message_log.append((chat_id, msg.message_id))
 
 # Replace your real token here
