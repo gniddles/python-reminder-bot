@@ -1,28 +1,33 @@
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, MessageHandler, ContextTypes, filters, CommandHandler, CallbackQueryHandler
 import asyncio
 import re
 
-reminders = []
+reminders = {}  # message: (timestamp, asyncio.Task or message_id)
 reminder_list_message_id = None
 reminder_list_chat_id = None
-message_log = []
+
+LOCAL_TIMEZONE = ZoneInfo("Europe/Kyiv")
 
 
 async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE):
     global reminder_list_message_id, reminder_list_chat_id
 
+    if not reminder_list_chat_id:
+        return  # Chat is unknown
+
     if reminders:
         lines = ["📋 <b>Upcoming Reminders:</b>"]
-        for msg, ts in sorted(reminders, key=lambda x: x[1]):
-            time_str = datetime.fromtimestamp(ts).strftime("%d %b %H:%M")
+        for msg, (ts, _) in sorted(reminders.items(), key=lambda x: x[1][0]):
+            time_str = datetime.fromtimestamp(ts, tz=LOCAL_TIMEZONE).strftime("%d %b %H:%M")
             lines.append(f"• <b>{msg}</b> at <i>{time_str}</i>")
         text = "\n".join(lines)
     else:
         text = "📋 <b>No upcoming reminders.</b>"
 
-    if reminder_list_message_id and reminder_list_chat_id:
+    if reminder_list_message_id:
         try:
             await context.bot.edit_message_text(
                 chat_id=reminder_list_chat_id,
@@ -31,35 +36,64 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML"
             )
             return
-        except:
-            pass
+        except Exception as e:
+            if "Message is not modified" in str(e):
+                # This is NOT a failure, just nothing to update
+                return
+            else:
+                print("Could not edit reminder list message:", e)
+                # Only reset if it failed for other reasons
+                reminder_list_message_id = None
+                reminder_list_chat_id = None
 
-    msg = await context.bot.send_message(chat_id=reminder_list_chat_id or context._chat_id,
-                                         text=text, parse_mode="HTML")
-    reminder_list_message_id = msg.message_id
-    reminder_list_chat_id = msg.chat.id
+    # Only send a new message if no valid message exists
+    if reminder_list_message_id is None:
+        try:
+            msg = await context.bot.send_message(chat_id=reminder_list_chat_id, text=text, parse_mode="HTML")
+            reminder_list_message_id = msg.message_id
+        except Exception as e:
+            print("Failed to send reminder list message:", e)
+
+
+
 
 
 async def send_scheduled_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message: str, delay_seconds: int):
-    timestamp = datetime.now().timestamp() + delay_seconds
-    reminders.append((message, timestamp))
+    timestamp = datetime.now(LOCAL_TIMEZONE).timestamp() + delay_seconds
+
+    async def task_body():
+        await asyncio.sleep(delay_seconds)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Complete", callback_data=f"complete|{message}")]
+        ])
+        sent_msg = await context.bot.send_message(chat_id=chat_id, text=f"⏰ Reminder: {message}", reply_markup=keyboard)
+        reminders[message] = (timestamp, sent_msg.message_id)
+        await update_reminder_list(context)
+
+    task = asyncio.create_task(task_body())
+    reminders[message] = (timestamp, task)
     await update_reminder_list(context)
 
-    await asyncio.sleep(delay_seconds)
 
-    sent_msg = await context.bot.send_message(chat_id=chat_id, text=f"⏰ Reminder: {message}")
+async def complete_reminder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-    async def delete_reminder():
-        await asyncio.sleep(300)
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=sent_msg.message_id)
-        except:
-            pass
+    if not query.data.startswith("complete|"):
+        return
 
-    asyncio.create_task(delete_reminder())
+    _, message = query.data.split("|", 1)
+    chat_id = query.message.chat_id
+    msg_id = query.message.message_id
 
-    reminders[:] = [(m, t) for m, t in reminders if not (m == message and abs(t - timestamp) < 1)]
-    await update_reminder_list(context)
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+    except:
+        pass
+
+    if message in reminders:
+        del reminders[message]
+        await update_reminder_list(context)
 
 
 def parse_time_prefix(text: str):
@@ -76,42 +110,37 @@ def parse_time_prefix(text: str):
 
 
 def parse_datetime_message(text: str):
-    now = datetime.now()
+    now = datetime.now(LOCAL_TIMEZONE)
 
-    match_after = re.match(r'day after tomorrow\s+(\d{1,2}):(\d{2})\s+(.+)', text.strip())
-    if match_after:
-        hour, minute, message = match_after.groups()
-        dt = (now + timedelta(days=2)).replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
-        return max((dt - now).total_seconds(), -1), message
+    patterns = [
+        (r'day after tomorrow\s+(\d{1,2}):(\d{2})\s+(.+)', 2),
+        (r'tomorrow\s+(\d{1,2}):(\d{2})\s+(.+)', 1),
+        (r'today\s+(\d{1,2}):(\d{2})\s+(.+)', 0)
+    ]
 
-    match_tomorrow = re.match(r'tomorrow\s+(\d{1,2}):(\d{2})\s+(.+)', text.strip())
-    if match_tomorrow:
-        hour, minute, message = match_tomorrow.groups()
-        dt = (now + timedelta(days=1)).replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
-        return max((dt - now).total_seconds(), -1), message
-
-    match_today = re.match(r'today\s+(\d{1,2}):(\d{2})\s+(.+)', text.strip())
-    if match_today:
-        hour, minute, message = match_today.groups()
-        dt = now.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
-        return max((dt - now).total_seconds(), -1), message
+    for pattern, days in patterns:
+        match = re.match(pattern, text.strip())
+        if match:
+            hour, minute, message = match.groups()
+            dt = (now + timedelta(days=days)).replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
+            return max((dt - now).total_seconds(), -1), message
 
     match_full = re.match(r'(\d{1,2})\s+([a-z]+)\s+(\d{1,2}):(\d{2})\s+(.+)', text.strip(), re.IGNORECASE)
     if match_full:
         day, month_str, hour, minute, message = match_full.groups()
         for fmt in ("%d %B %H:%M", "%d %b %H:%M"):
             try:
-                dt = datetime.strptime(f"{day} {month_str} {hour}:{minute}", fmt).replace(year=now.year)
+                dt = datetime.strptime(f"{day} {month_str} {hour}:{minute}", fmt).replace(year=now.year, tzinfo=LOCAL_TIMEZONE)
                 return max((dt - now).total_seconds(), -1), message
             except:
                 continue
 
-    match_partial_time = re.match(r'(\d{1,2})\s+([a-z]+)\s+(\d{1,2})\s+(.+)', text.strip(), re.IGNORECASE)
-    if match_partial_time:
-        day, month_str, hour, message = match_partial_time.groups()
+    match_partial = re.match(r'(\d{1,2})\s+([a-z]+)\s+(\d{1,2})\s+(.+)', text.strip(), re.IGNORECASE)
+    if match_partial:
+        day, month_str, hour, message = match_partial.groups()
         for fmt in ("%d %B %H:%M", "%d %b %H:%M"):
             try:
-                dt = datetime.strptime(f"{day} {month_str} {hour}:00", fmt).replace(year=now.year)
+                dt = datetime.strptime(f"{day} {month_str} {hour}:00", fmt).replace(year=now.year, tzinfo=LOCAL_TIMEZONE)
                 return max((dt - now).total_seconds(), -1), message
             except:
                 continue
@@ -130,21 +159,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg_id = update.message.message_id
     text = update.message.text.lower()
 
-    async def delete_later(message_id):
+    async def delete_later(mid):
         await asyncio.sleep(5)
         try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
         except:
             pass
 
     asyncio.create_task(delete_later(msg_id))
 
-    global reminder_list_chat_id, reminder_list_message_id
-    reminder_list_chat_id = chat_id
-    if reminder_list_message_id is None:
-        await update_reminder_list(context)
+    global reminder_list_chat_id
+    if reminder_list_chat_id is None:
+        reminder_list_chat_id = chat_id
+
 
     if text in ["delete all", "del all"]:
+        for _, task in reminders.values():
+            if isinstance(task, asyncio.Task):
+                task.cancel()
         reminders.clear()
         await update_reminder_list(context)
         msg = await context.bot.send_message(chat_id=chat_id, text="🗑️ All reminders deleted.")
@@ -153,19 +185,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text.startswith("delete ") or text.startswith("del "):
         to_delete = text.replace("delete ", "", 1).replace("del ", "", 1).strip()
-        before = len(reminders)
-        reminders[:] = [(msg, ts) for (msg, ts) in reminders if msg.lower() != to_delete.lower()]
-
-        if len(reminders) < before:
+        if to_delete in reminders:
+            _, task = reminders[to_delete]
+            if isinstance(task, asyncio.Task):
+                task.cancel()
+            del reminders[to_delete]
+            await update_reminder_list(context)
             msg = await context.bot.send_message(chat_id=chat_id, text=f"✅ Reminder \"{to_delete}\" deleted.")
         else:
             msg = await context.bot.send_message(chat_id=chat_id, text=f"⚠️ No reminder found with message: \"{to_delete}\"")
         asyncio.create_task(delete_later(msg.message_id))
-        await update_reminder_list(context)
         return
 
     if "time" in text:
-        now = datetime.now()
+        now = datetime.now(LOCAL_TIMEZONE)
         msg = await context.bot.send_message(chat_id=chat_id, text=f"Current time: {now.strftime('%H:%M:%S')}")
         asyncio.create_task(delete_later(msg.message_id))
         return
@@ -192,7 +225,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(send_scheduled_message(context, chat_id, reminder_message, delay_seconds))
         return
 
-    msg = await context.bot.send_message(chat_id=chat_id, text="I didn’t understand that. Try again'")
+    msg = await context.bot.send_message(chat_id=chat_id, text="I didn’t understand that. Try again")
     asyncio.create_task(delete_later(msg.message_id))
 
 
@@ -200,12 +233,12 @@ def get_help_keyboard(state="full"):
     if state == "full":
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("📉 Collapse", callback_data="collapse_help"),
-             InlineKeyboardButton("🗑️ Delete", callback_data="delete_help")]
+             InlineKeyboardButton("👝 Delete", callback_data="delete_help")]
         ])
     else:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("📖 Uncollapse", callback_data="uncollapse_help"),
-             InlineKeyboardButton("🗑️ Delete", callback_data="delete_help")]
+             InlineKeyboardButton("👝 Delete", callback_data="delete_help")]
         ])
 
 
@@ -253,7 +286,8 @@ async def help_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 app = Application.builder().token("8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE").build()
 
 app.add_handler(CommandHandler("help", help_command))
-app.add_handler(CallbackQueryHandler(help_button_handler))
+app.add_handler(CallbackQueryHandler(help_button_handler, pattern=r"^(collapse_help|uncollapse_help|delete_help)$"))
+app.add_handler(CallbackQueryHandler(complete_reminder_handler, pattern=r"^complete\|"))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 print("Bot is running...")
