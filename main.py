@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
-from telegram import Update
-from telegram.ext import Application, MessageHandler, ContextTypes, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, MessageHandler, ContextTypes, filters, CommandHandler, CallbackQueryHandler
 import asyncio
 import re
 
@@ -144,15 +144,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if reminder_list_message_id is None:
         await update_reminder_list(context)
 
-    if text == "clear all":
+    if text in ["delete all", "del all"]:
         reminders.clear()
         await update_reminder_list(context)
-        msg = await context.bot.send_message(chat_id=chat_id, text="🗑️ All reminders cleared.")
+        msg = await context.bot.send_message(chat_id=chat_id, text="🗑️ All reminders deleted.")
         asyncio.create_task(delete_later(msg.message_id))
         return
 
-    if text.startswith("delete "):
-        to_delete = text.replace("delete ", "", 1).strip()
+    if text.startswith("delete ") or text.startswith("del "):
+        to_delete = text.replace("delete ", "", 1).replace("del ", "", 1).strip()
         before = len(reminders)
         reminders[:] = [(msg, ts) for (msg, ts) in reminders if msg.lower() != to_delete.lower()]
 
@@ -162,25 +162,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = await context.bot.send_message(chat_id=chat_id, text=f"⚠️ No reminder found with message: \"{to_delete}\"")
         asyncio.create_task(delete_later(msg.message_id))
         await update_reminder_list(context)
-        return
-
-    if "clear" in text:
-        for cid, mid in message_log:
-            try:
-                await context.bot.delete_message(chat_id=cid, message_id=mid)
-            except:
-                pass
-        message_log.clear()
-
-        if reminder_list_message_id:
-            try:
-                await context.bot.delete_message(chat_id=reminder_list_chat_id, message_id=reminder_list_message_id)
-            except:
-                pass
-            reminder_list_message_id = None
-
-        msg = await context.bot.send_message(chat_id=chat_id, text="🧹 Chat cleared. Reminders kept.")
-        asyncio.create_task(delete_later(msg.message_id))
         return
 
     if "time" in text:
@@ -215,9 +196,65 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(delete_later(msg.message_id))
 
 
+def get_help_keyboard(state="full"):
+    if state == "full":
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("📉 Collapse", callback_data="collapse_help"),
+             InlineKeyboardButton("🗑️ Delete", callback_data="delete_help")]
+        ])
+    else:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("📖 Uncollapse", callback_data="uncollapse_help"),
+             InlineKeyboardButton("🗑️ Delete", callback_data="delete_help")]
+        ])
+
+
+def get_full_help_text():
+    return (
+        "<b>🤖 Reminder Bot - Help Menu</b>\n\n"
+        "You can use the following formats to set reminders:\n"
+        "• <code>10m feed the cat</code>\n"
+        "• <code>1h30m water the plants</code>\n"
+        "• <code>today 14:00 meeting</code>\n"
+        "• <code>tomorrow 09:15 dentist</code>\n"
+        "• <code>22 June 19:30 birthday party</code>\n\n"
+        "🗑️ To delete reminders:\n"
+        "• <b>delete all</b> or <b>del all</b>\n"
+        "• <b>delete [name]</b> or <b>del [name]</b>\n"
+        "• <b>time</b> — show current time\n\n"
+        "Use the buttons below to collapse or delete this message."
+    )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text(get_full_help_text(), parse_mode="HTML", reply_markup=get_help_keyboard("full"))
+    await asyncio.sleep(5)
+    try:
+        await context.bot.delete_message(chat_id=msg.chat.id, message_id=update.message.message_id)
+    except:
+        pass
+
+
+async def help_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "collapse_help":
+        await query.edit_message_text("📖 <b>Help function</b>", parse_mode="HTML", reply_markup=get_help_keyboard("collapsed"))
+    elif query.data == "uncollapse_help":
+        await query.edit_message_text(get_full_help_text(), parse_mode="HTML", reply_markup=get_help_keyboard("full"))
+    elif query.data == "delete_help":
+        try:
+            await context.bot.delete_message(chat_id=query.message.chat_id, message_id=query.message.message_id)
+        except:
+            pass
+
 
 app = Application.builder().token("8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE").build()
-print("Bot is running...")
 
+app.add_handler(CommandHandler("help", help_command))
+app.add_handler(CallbackQueryHandler(help_button_handler))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+print("Bot is running...")
 app.run_polling()
