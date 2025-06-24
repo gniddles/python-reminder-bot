@@ -4,19 +4,49 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, MessageHandler, ContextTypes, filters, CommandHandler, CallbackQueryHandler
 import asyncio
 import re
+import logging
+
+logging.basicConfig(level=logging.INFO)
 
 reminders = {}  # message: (timestamp, asyncio.Task or message_id)
 reminder_list_message_id = None
 reminder_list_chat_id = None
+removal_state = {}  # chat_id: {'mode': 'normal'|'confirm', 'target': str | None}
 
 LOCAL_TIMEZONE = ZoneInfo("Europe/Kyiv")
+
+
+def get_removal_keyboard(chat_id=None):
+    if chat_id in removal_state:
+        state = removal_state[chat_id]
+        if state.get("mode") == "confirm" and state.get("target"):
+            msg_to_remove = state["target"]
+            return InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Yes, delete", callback_data=f"confirm_delete|{msg_to_remove}"),
+                    InlineKeyboardButton("❌ Cancel", callback_data="cancel_confirm")
+                ]
+            ])
+        elif state.get("mode") == "removal":
+            buttons = [
+                [InlineKeyboardButton(f"🗑️ {msg}", callback_data=f"remove_reminder|{msg}")]
+                for msg in reminders.keys()
+            ]
+            buttons.append([InlineKeyboardButton("✅ Done", callback_data="cancel_removal")])
+            return InlineKeyboardMarkup(buttons)
+    # default keyboard
+    if reminders:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🗑️ Remove Reminder", callback_data="start_removal")]
+        ])
+    return None
 
 
 async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE):
     global reminder_list_message_id, reminder_list_chat_id
 
     if not reminder_list_chat_id:
-        return  # Chat is unknown
+        return
 
     if reminders:
         lines = ["📋 <b>Upcoming Reminders:</b>"]
@@ -27,34 +57,28 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE):
     else:
         text = "📋 <b>No upcoming reminders.</b>"
 
-    if reminder_list_message_id:
-        try:
+    try:
+        if reminder_list_message_id:
             await context.bot.edit_message_text(
                 chat_id=reminder_list_chat_id,
                 message_id=reminder_list_message_id,
                 text=text,
-                parse_mode="HTML"
+                parse_mode="HTML",
+                reply_markup=get_removal_keyboard(reminder_list_chat_id)
             )
-            return
-        except Exception as e:
-            if "Message is not modified" in str(e):
-                # This is NOT a failure, just nothing to update
-                return
-            else:
-                print("Could not edit reminder list message:", e)
-                # Only reset if it failed for other reasons
-                reminder_list_message_id = None
-                reminder_list_chat_id = None
-
-    # Only send a new message if no valid message exists
-    if reminder_list_message_id is None:
-        try:
-            msg = await context.bot.send_message(chat_id=reminder_list_chat_id, text=text, parse_mode="HTML")
+        else:
+            msg = await context.bot.send_message(
+                chat_id=reminder_list_chat_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=get_removal_keyboard(reminder_list_chat_id)
+            )
             reminder_list_message_id = msg.message_id
-        except Exception as e:
-            print("Failed to send reminder list message:", e)
 
-
+    except Exception as e:
+        # Only reset if the message cannot be edited due to it being deleted or invalid
+        if "message to edit not found" in str(e).lower() or "message is not modified" not in str(e).lower():
+            reminder_list_message_id = None
 
 
 
@@ -78,24 +102,58 @@ async def send_scheduled_message(context: ContextTypes.DEFAULT_TYPE, chat_id: in
 async def complete_reminder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
-    if not query.data.startswith("complete|"):
-        return
-
     _, message = query.data.split("|", 1)
-    chat_id = query.message.chat_id
-    msg_id = query.message.message_id
-
     try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        await context.bot.delete_message(chat_id=query.message.chat_id, message_id=query.message.message_id)
     except:
         pass
-
     if message in reminders:
         del reminders[message]
         await update_reminder_list(context)
 
 
+async def handle_removal_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat_id
+
+    if query.data == "start_removal":
+        if reminders:
+            removal_state[chat_id] = {"mode": "removal", "target": None}
+        await update_reminder_list(context)
+
+    elif query.data.startswith("remove_reminder|"):
+        _, msg_to_remove = query.data.split("|", 1)
+        removal_state[chat_id] = {"mode": "confirm", "target": msg_to_remove}
+        await update_reminder_list(context)
+
+    elif query.data.startswith("confirm_delete|"):
+        _, msg_to_remove = query.data.split("|", 1)
+        if msg_to_remove in reminders:
+            _, task = reminders[msg_to_remove]
+            if isinstance(task, asyncio.Task):
+                task.cancel()
+            del reminders[msg_to_remove]
+        removal_state.pop(chat_id, None)
+        await update_reminder_list(context)
+
+    elif query.data == "cancel_confirm":
+        if chat_id in removal_state and removal_state[chat_id]["mode"] == "confirm":
+            removal_state[chat_id] = {"mode": "removal", "target": None}
+            await update_reminder_list(context)
+
+    elif query.data == "cancel_removal":
+        removal_state.pop(chat_id, None)
+        await update_reminder_list(context)
+
+
+# All helper and parser functions unchanged
+# (parse_time_prefix, parse_datetime_message, handle_message, help_command, etc.)
+# Only adding updated handlers to app below
+
+# -- Keep the rest of your helper functions and `handle_message` here (unchanged) --
+
+# APP SETUP
 def parse_time_prefix(text: str):
     match = re.match(r'(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?\s+(.*)', text.strip())
     if match:
@@ -283,12 +341,15 @@ async def help_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             pass
 
 
-app = Application.builder().token("8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE").build()
+app = Application.builder().token("1014634066:AAGTFzlrmJQ7KSM4Bh98o2050IqiL508w5g").build()
 
 app.add_handler(CommandHandler("help", help_command))
 app.add_handler(CallbackQueryHandler(help_button_handler, pattern=r"^(collapse_help|uncollapse_help|delete_help)$"))
 app.add_handler(CallbackQueryHandler(complete_reminder_handler, pattern=r"^complete\|"))
+app.add_handler(CallbackQueryHandler(handle_removal_button, pattern=r"^(start_removal|cancel_removal|remove_reminder\|.*)$"))
+app.add_handler(CallbackQueryHandler(handle_removal_button, pattern=r"^(start_removal|remove_reminder\|.*|confirm_delete\|.*|cancel_confirm|cancel_removal)$"))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
 
 print("Bot is running...")
 app.run_polling()
