@@ -16,16 +16,20 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE):
     global reminder_list_message_id, reminder_list_chat_id
 
     if not reminder_list_chat_id:
-        return  # Chat is unknown
+        return
 
+    buttons = []
     if reminders:
         lines = ["📋 <b>Upcoming Reminders:</b>"]
         for msg, (ts, _) in sorted(reminders.items(), key=lambda x: x[1][0]):
             time_str = datetime.fromtimestamp(ts, tz=LOCAL_TIMEZONE).strftime("%d %b %H:%M")
             lines.append(f"• <b>{msg}</b> at <i>{time_str}</i>")
         text = "\n".join(lines)
+        buttons = [[InlineKeyboardButton("❌ Remove Reminder", callback_data="open_remove_menu")]]
+        markup = InlineKeyboardMarkup(buttons)
     else:
         text = "📋 <b>No upcoming reminders.</b>"
+        markup = None
 
     if reminder_list_message_id:
         try:
@@ -33,29 +37,23 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE):
                 chat_id=reminder_list_chat_id,
                 message_id=reminder_list_message_id,
                 text=text,
-                parse_mode="HTML"
+                parse_mode="HTML",
+                reply_markup=markup
             )
             return
         except Exception as e:
             if "Message is not modified" in str(e):
-                # This is NOT a failure, just nothing to update
                 return
             else:
-                print("Could not edit reminder list message:", e)
-                # Only reset if it failed for other reasons
                 reminder_list_message_id = None
                 reminder_list_chat_id = None
 
-    # Only send a new message if no valid message exists
     if reminder_list_message_id is None:
         try:
-            msg = await context.bot.send_message(chat_id=reminder_list_chat_id, text=text, parse_mode="HTML")
+            msg = await context.bot.send_message(chat_id=reminder_list_chat_id, text=text, parse_mode="HTML", reply_markup=markup)
             reminder_list_message_id = msg.message_id
         except Exception as e:
             print("Failed to send reminder list message:", e)
-
-
-
 
 
 async def send_scheduled_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message: str, delay_seconds: int):
@@ -94,6 +92,58 @@ async def complete_reminder_handler(update: Update, context: ContextTypes.DEFAUL
     if message in reminders:
         del reminders[message]
         await update_reminder_list(context)
+
+
+async def reminder_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data
+
+    # Handle remove reminder interactions
+    if data == "open_remove_menu":
+        await query.answer()
+        if not reminders:
+            await query.edit_message_text("📋 <b>No reminders to remove.</b>", parse_mode="HTML")
+            return
+
+        buttons = [[InlineKeyboardButton(f"❌ {msg}", callback_data=f"confirm_remove|{msg}")] for msg in sorted(reminders.keys())]
+        buttons.append([InlineKeyboardButton("✅ Done", callback_data="done_remove_menu")])
+        await query.edit_message_text("🗑️ <b>Select reminder to remove:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+
+    elif data.startswith("confirm_remove|"):
+        await query.answer()
+        _, msg = data.split("|", 1)
+        confirm_buttons = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Yes, delete", callback_data=f"remove|{msg}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="open_remove_menu")
+            ]
+        ])
+        await query.edit_message_text(f"⚠️ Confirm deletion of reminder: <b>{msg}</b>", parse_mode="HTML", reply_markup=confirm_buttons)
+
+    elif data.startswith("remove|"):
+        await query.answer()
+        _, msg = data.split("|", 1)
+        if msg in reminders:
+            task = reminders[msg][1]
+            if isinstance(task, asyncio.Task):
+                task.cancel()
+            del reminders[msg]
+        await update_reminder_list(context)
+        if reminders:
+            buttons = [[InlineKeyboardButton(f"❌ {m}", callback_data=f"confirm_remove|{m}")] for m in sorted(reminders.keys())]
+            buttons.append([InlineKeyboardButton("✅ Done", callback_data="done_remove_menu")])
+            await query.edit_message_text("🗑️ <b>Select reminder to remove:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+        else:
+            await query.edit_message_text("📋 <b>No reminders to remove.</b>", parse_mode="HTML")
+
+    elif data == "done_remove_menu":
+        await query.answer()
+        await update_reminder_list(context)
+
+
+# Reminder: the rest of the code (parsers, handle_message, help functions, main setup) is already present below
+# No further change needed here since the above handler now fully manages the confirmation step
+
 
 
 def parse_time_prefix(text: str):
@@ -135,16 +185,6 @@ def parse_datetime_message(text: str):
             except:
                 continue
 
-    match_partial = re.match(r'(\d{1,2})\s+([a-z]+)\s+(\d{1,2})\s+(.+)', text.strip(), re.IGNORECASE)
-    if match_partial:
-        day, month_str, hour, message = match_partial.groups()
-        for fmt in ("%d %B %H:%M", "%d %b %H:%M"):
-            try:
-                dt = datetime.strptime(f"{day} {month_str} {hour}:00", fmt).replace(year=now.year, tzinfo=LOCAL_TIMEZONE)
-                return max((dt - now).total_seconds(), -1), message
-            except:
-                continue
-
     match_time = re.match(r'(\d{1,2}):(\d{2})\s+(.+)', text.strip())
     if match_time:
         hour, minute, message = match_time.groups()
@@ -171,7 +211,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global reminder_list_chat_id
     if reminder_list_chat_id is None:
         reminder_list_chat_id = chat_id
-
 
     if text in ["delete all", "del all"]:
         for _, task in reminders.values():
@@ -283,11 +322,12 @@ async def help_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             pass
 
 
-app = Application.builder().token("8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE").build()
+app = Application.builder().token("1014634066:AAGTFzlrmJQ7KSM4Bh98o2050IqiL508w5g").build()
 
 app.add_handler(CommandHandler("help", help_command))
 app.add_handler(CallbackQueryHandler(help_button_handler, pattern=r"^(collapse_help|uncollapse_help|delete_help)$"))
-app.add_handler(CallbackQueryHandler(complete_reminder_handler, pattern=r"^complete\|"))
+app.add_handler(CallbackQueryHandler(complete_reminder_handler, pattern=r"^complete\\|"))
+app.add_handler(CallbackQueryHandler(reminder_button_handler, pattern=r"^(open_remove_menu|remove\\|.+|done_remove_menu)$"))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 print("Bot is running...")
