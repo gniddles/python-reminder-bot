@@ -5,12 +5,6 @@ from telegram.ext import Application, MessageHandler, ContextTypes, filters, Com
 import asyncio
 import re
 from telegram.error import TelegramError
-import logging
-
-logging.basicConfig(level=logging.INFO)
-
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logging.error(msg="Exception while handling an update:", exc_info=context.error)
 
 
 
@@ -338,7 +332,7 @@ app.add_handler(CallbackQueryHandler(help_button_handler, pattern=r"^(collapse_h
 app.add_handler(CallbackQueryHandler(complete_reminder_handler, pattern=r"^complete\|"))
 app.add_handler(CallbackQueryHandler(handle_removal_button, pattern=r"^(start_removal|cancel_removal|remove_reminder\|.*)$"))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-app.add_error_handler(error_handler)
+
 
 print("Bot is running...")
 app.run_polling()
