@@ -292,3 +292,4 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 print("Bot is running...")
 app.run_polling()
+# asdasdasdasd
