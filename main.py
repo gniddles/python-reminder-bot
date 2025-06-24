@@ -12,6 +12,7 @@ reminders = {}  # message: (timestamp, asyncio.Task or message_id)
 reminder_list_message_id = None
 reminder_list_chat_id = None
 removal_state = {}  # chat_id: {'mode': 'normal'|'confirm', 'target': str | None}
+reminder_list_pinned = False
 
 LOCAL_TIMEZONE = ZoneInfo("Europe/Kyiv")
 
@@ -75,6 +76,13 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE):
             )
             reminder_list_message_id = msg.message_id
 
+            if reminder_list_pinned:
+                try:
+                    await context.bot.pin_chat_message(chat_id=reminder_list_chat_id, message_id=msg.message_id, disable_notification=True)
+                except:
+                    pass
+
+
     except Exception as e:
         # Only reset if the message cannot be edited due to it being deleted or invalid
         if "message to edit not found" in str(e).lower() or "message is not modified" not in str(e).lower():
@@ -88,14 +96,38 @@ async def send_scheduled_message(context: ContextTypes.DEFAULT_TYPE, chat_id: in
     async def task_body():
         await asyncio.sleep(delay_seconds)
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Complete", callback_data=f"complete|{message}")]
+            [
+                InlineKeyboardButton("✅ Complete", callback_data=f"complete|{message}"),
+                InlineKeyboardButton("🔁 Snooze 5m", callback_data=f"snooze|{message}|300")
+            ]
         ])
+
         sent_msg = await context.bot.send_message(chat_id=chat_id, text=f"⏰ Reminder: {message}", reply_markup=keyboard)
         reminders[message] = (timestamp, sent_msg.message_id)
         await update_reminder_list(context)
 
     task = asyncio.create_task(task_body())
     reminders[message] = (timestamp, task)
+    await update_reminder_list(context)
+
+
+async def snooze_reminder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, message, snooze_sec = query.data.split("|")
+    try:
+        await context.bot.delete_message(chat_id=query.message.chat_id, message_id=query.message.message_id)
+    except:
+        pass
+    snooze_seconds = int(snooze_sec)
+    chat_id = query.message.chat_id
+    await send_scheduled_message(context, chat_id, message, snooze_seconds)
+
+async def pin_reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global reminder_list_pinned
+    reminder_list_pinned = not reminder_list_pinned
+    status = "enabled 📌" if reminder_list_pinned else "disabled ❌"
+    await update.message.reply_text(f"Pinned reminders are now {status}.")
     await update_reminder_list(context)
 
 
@@ -341,7 +373,7 @@ async def help_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             pass
 
 
-app = Application.builder().token("1014634066:AAGTFzlrmJQ7KSM4Bh98o2050IqiL508w5g").build()
+app = Application.builder().token("8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE").build()
 
 app.add_handler(CommandHandler("help", help_command))
 app.add_handler(CallbackQueryHandler(help_button_handler, pattern=r"^(collapse_help|uncollapse_help|delete_help)$"))
@@ -349,6 +381,9 @@ app.add_handler(CallbackQueryHandler(complete_reminder_handler, pattern=r"^compl
 app.add_handler(CallbackQueryHandler(handle_removal_button, pattern=r"^(start_removal|cancel_removal|remove_reminder\|.*)$"))
 app.add_handler(CallbackQueryHandler(handle_removal_button, pattern=r"^(start_removal|remove_reminder\|.*|confirm_delete\|.*|cancel_confirm|cancel_removal)$"))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+app.add_handler(CallbackQueryHandler(snooze_reminder_handler, pattern=r"^snooze\|"))
+app.add_handler(CommandHandler("pin_reminders", pin_reminders_command))
+
 
 
 print("Bot is running...")
