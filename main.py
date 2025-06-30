@@ -10,8 +10,7 @@ logging.basicConfig(level=logging.INFO)
 
 TOKEN = "8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE"
 reminders = {}  # chat_id: {message: (timestamp, task_or_id)}
-reminder_list_message_id = None
-reminder_list_chat_id = None
+reminder_list_message_ids = {}  # chat_id: message_id
 removal_state = {}  # chat_id: {'mode': 'normal'|'confirm', 'target': str | None}
 reminder_list_pinned = False
 
@@ -47,8 +46,6 @@ def get_removal_keyboard(chat_id=None):
 
 
 async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id=None):
-    global reminder_list_message_id, reminder_list_chat_id
-
     if chat_id is None:
         return
 
@@ -64,14 +61,12 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id=None)
         text = "📋 <b>No upcoming reminders.</b>"
 
     try:
-        if reminder_list_chat_id != chat_id:
-            reminder_list_message_id = None
-        reminder_list_chat_id = chat_id
+        message_id = reminder_list_message_ids.get(chat_id)
 
-        if reminder_list_message_id:
+        if message_id:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
-                message_id=reminder_list_message_id,
+                message_id=message_id,
                 text=text,
                 parse_mode="HTML",
                 reply_markup=get_removal_keyboard(chat_id)
@@ -83,7 +78,7 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id=None)
                 parse_mode="HTML",
                 reply_markup=get_removal_keyboard(chat_id)
             )
-            reminder_list_message_id = msg.message_id
+            reminder_list_message_ids[chat_id] = msg.message_id
 
             if reminder_list_pinned:
                 try:
@@ -92,7 +87,8 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id=None)
                     pass
     except Exception as e:
         if "message to edit not found" in str(e).lower() or "message is not modified" not in str(e).lower():
-            reminder_list_message_id = None
+            reminder_list_message_ids.pop(chat_id, None)
+
 
 
 
