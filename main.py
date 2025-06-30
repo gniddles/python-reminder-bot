@@ -8,7 +8,7 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 
-TOKEN = "1014634066:AAGTFzlrmJQ7KSM4Bh98o2050IqiL508w5g"
+TOKEN = "8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE"
 reminders = {}  # chat_id: {message: (timestamp, task_or_id)}
 reminder_list_message_ids = {}  # chat_id: message_id
 removal_state = {}  # chat_id: {'mode': 'normal'|'confirm', 'target': str | None}
