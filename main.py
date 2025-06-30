@@ -421,24 +421,16 @@ async def help_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 app = Application.builder().token(TOKEN).build()
 
-# ✅ Register known commands first
+
 app.add_handler(CommandHandler("start", start_command))
 app.add_handler(CommandHandler("help", help_command))
 app.add_handler(CommandHandler("pin_reminders", pin_reminders_command))
-
-# ✅ Then register callback handlers
 app.add_handler(CallbackQueryHandler(help_button_handler, pattern=r"^(collapse_help|uncollapse_help|delete_help)$"))
 app.add_handler(CallbackQueryHandler(complete_reminder_handler, pattern=r"^complete\|"))
 app.add_handler(CallbackQueryHandler(handle_removal_button, pattern=r"^(start_removal|remove_reminder\|.*|confirm_delete\|.*|cancel_confirm|cancel_removal)$"))
 app.add_handler(CallbackQueryHandler(snooze_reminder_handler, pattern=r"^snooze\|"))
-
-# ✅ Then message handler for normal text
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-# ✅ Finally, catch-all for unknown commands
 app.add_handler(MessageHandler(filters.COMMAND, unknown_command_handler))
-
-
 
 
 
