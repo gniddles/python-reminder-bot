@@ -176,10 +176,31 @@ async def snooze_reminder_handler(update: Update, context: ContextTypes.DEFAULT_
 
 async def pin_reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global reminder_list_pinned
+    chat_id = update.effective_chat.id
+    command_msg_id = update.message.message_id
+
+    # Toggle pin state
     reminder_list_pinned = not reminder_list_pinned
     status = "enabled 📌" if reminder_list_pinned else "disabled ❌"
-    await update.message.reply_text(f"Pinned reminders are now {status}.")
+
+    # Send confirmation message
+    confirmation = await update.message.reply_text(f"Pinned reminders are now {status}.")
+
+    # Define deletion task
+    async def delete_later():
+        await asyncio.sleep(5)
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=command_msg_id)
+        except:
+            pass
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=confirmation.message_id)
+        except:
+            pass
+
+    asyncio.create_task(delete_later())
     await update_reminder_list(context)
+
 
 
 async def complete_reminder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
