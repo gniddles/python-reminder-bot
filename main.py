@@ -8,13 +8,62 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 
-TOKEN = "8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE"
+TOKEN = "1014634066:AAGTFzlrmJQ7KSM4Bh98o2050IqiL508w5g"
 reminders = {}  # chat_id: {message: (timestamp, task_or_id)}
 reminder_list_message_ids = {}  # chat_id: message_id
 removal_state = {}  # chat_id: {'mode': 'normal'|'confirm', 'target': str | None}
 reminder_list_pinned = False
 
 LOCAL_TIMEZONE = ZoneInfo("Europe/Kyiv")
+
+
+from telegram.ext import CommandHandler, MessageHandler, filters
+
+async def unknown_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    msg_id = update.message.message_id
+
+    async def delete_later(mid):
+        await asyncio.sleep(5)
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+        except:
+            pass
+
+    # Reply and delete both messages
+    reply = await update.message.reply_text("I didn’t understand that. Try again")
+    asyncio.create_task(delete_later(msg_id))               # delete user’s command
+    asyncio.create_task(delete_later(reply.message_id))     # delete bot’s reply
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    start_msg_id = update.message.message_id
+
+    # Send welcome message
+    welcome = await update.message.reply_text(
+        "👋 Hello, this is a reminder chat bot. Use /help function to see how to use me. You can delete this message when you want"
+    )
+
+    # Schedule deletion of user's /start command after 5 seconds
+    async def delete_start_command():
+        await asyncio.sleep(5)
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=start_msg_id)
+        except:
+            pass
+
+    # Schedule deletion of the welcome message after 5 minutes
+    async def delete_welcome_message():
+        await asyncio.sleep(300)  # 300 seconds = 5 minutes
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=welcome.message_id)
+        except:
+            pass
+
+    asyncio.create_task(delete_start_command())
+    asyncio.create_task(delete_welcome_message())
+
+
 
 
 def get_removal_keyboard(chat_id=None):
@@ -372,14 +421,24 @@ async def help_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 app = Application.builder().token(TOKEN).build()
 
+# ✅ Register known commands first
+app.add_handler(CommandHandler("start", start_command))
 app.add_handler(CommandHandler("help", help_command))
+app.add_handler(CommandHandler("pin_reminders", pin_reminders_command))
+
+# ✅ Then register callback handlers
 app.add_handler(CallbackQueryHandler(help_button_handler, pattern=r"^(collapse_help|uncollapse_help|delete_help)$"))
 app.add_handler(CallbackQueryHandler(complete_reminder_handler, pattern=r"^complete\|"))
-app.add_handler(CallbackQueryHandler(handle_removal_button, pattern=r"^(start_removal|cancel_removal|remove_reminder\|.*)$"))
 app.add_handler(CallbackQueryHandler(handle_removal_button, pattern=r"^(start_removal|remove_reminder\|.*|confirm_delete\|.*|cancel_confirm|cancel_removal)$"))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.add_handler(CallbackQueryHandler(snooze_reminder_handler, pattern=r"^snooze\|"))
-app.add_handler(CommandHandler("pin_reminders", pin_reminders_command))
+
+# ✅ Then message handler for normal text
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+# ✅ Finally, catch-all for unknown commands
+app.add_handler(MessageHandler(filters.COMMAND, unknown_command_handler))
+
+
 
 
 
