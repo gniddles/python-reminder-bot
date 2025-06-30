@@ -8,7 +8,7 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 
-reminders = {}  # message: (timestamp, asyncio.Task or message_id)
+reminders = {}  # chat_id: {message: (timestamp, task_or_id)}
 reminder_list_message_id = None
 reminder_list_chat_id = None
 removal_state = {}  # chat_id: {'mode': 'normal'|'confirm', 'target': str | None}
@@ -18,6 +18,7 @@ LOCAL_TIMEZONE = ZoneInfo("Europe/Kyiv")
 
 
 def get_removal_keyboard(chat_id=None):
+    user_reminders = reminders.get(chat_id, {})
     if chat_id in removal_state:
         state = removal_state[chat_id]
         if state.get("mode") == "confirm" and state.get("target"):
@@ -31,27 +32,30 @@ def get_removal_keyboard(chat_id=None):
         elif state.get("mode") == "removal":
             buttons = [
                 [InlineKeyboardButton(f"🗑️ {msg}", callback_data=f"remove_reminder|{msg}")]
-                for msg in reminders.keys()
+                for msg in user_reminders.keys()
             ]
             buttons.append([InlineKeyboardButton("✅ Done", callback_data="cancel_removal")])
             return InlineKeyboardMarkup(buttons)
-    # default keyboard
-    if reminders:
+    if user_reminders:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("🗑️ Remove Reminder", callback_data="start_removal")]
         ])
     return None
 
 
-async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE):
+
+
+async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id=None):
     global reminder_list_message_id, reminder_list_chat_id
 
-    if not reminder_list_chat_id:
+    if chat_id is None:
         return
 
-    if reminders:
+    user_reminders = reminders.get(chat_id, {})
+
+    if user_reminders:
         lines = ["📋 <b>Upcoming Reminders:</b>"]
-        for msg, (ts, _) in sorted(reminders.items(), key=lambda x: x[1][0]):
+        for msg, (ts, _) in sorted(user_reminders.items(), key=lambda x: x[1][0]):
             time_str = datetime.fromtimestamp(ts, tz=LOCAL_TIMEZONE).strftime("%d %b %H:%M")
             lines.append(f"• <b>{msg}</b> at <i>{time_str}</i>")
         text = "\n".join(lines)
@@ -59,32 +63,33 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE):
         text = "📋 <b>No upcoming reminders.</b>"
 
     try:
+        if reminder_list_chat_id != chat_id:
+            reminder_list_message_id = None
+        reminder_list_chat_id = chat_id
+
         if reminder_list_message_id:
             await context.bot.edit_message_text(
-                chat_id=reminder_list_chat_id,
+                chat_id=chat_id,
                 message_id=reminder_list_message_id,
                 text=text,
                 parse_mode="HTML",
-                reply_markup=get_removal_keyboard(reminder_list_chat_id)
+                reply_markup=get_removal_keyboard(chat_id)
             )
         else:
             msg = await context.bot.send_message(
-                chat_id=reminder_list_chat_id,
+                chat_id=chat_id,
                 text=text,
                 parse_mode="HTML",
-                reply_markup=get_removal_keyboard(reminder_list_chat_id)
+                reply_markup=get_removal_keyboard(chat_id)
             )
             reminder_list_message_id = msg.message_id
 
             if reminder_list_pinned:
                 try:
-                    await context.bot.pin_chat_message(chat_id=reminder_list_chat_id, message_id=msg.message_id, disable_notification=True)
+                    await context.bot.pin_chat_message(chat_id=chat_id, message_id=msg.message_id, disable_notification=True)
                 except:
                     pass
-
-
     except Exception as e:
-        # Only reset if the message cannot be edited due to it being deleted or invalid
         if "message to edit not found" in str(e).lower() or "message is not modified" not in str(e).lower():
             reminder_list_message_id = None
 
@@ -101,14 +106,14 @@ async def send_scheduled_message(context: ContextTypes.DEFAULT_TYPE, chat_id: in
                 InlineKeyboardButton("🔁 Snooze 5m", callback_data=f"snooze|{message}|300")
             ]
         ])
-
         sent_msg = await context.bot.send_message(chat_id=chat_id, text=f"⏰ Reminder: {message}", reply_markup=keyboard)
-        reminders[message] = (timestamp, sent_msg.message_id)
-        await update_reminder_list(context)
+        reminders.setdefault(chat_id, {})[message] = (timestamp, sent_msg.message_id)
+        await update_reminder_list(context, chat_id)
 
     task = asyncio.create_task(task_body())
-    reminders[message] = (timestamp, task)
-    await update_reminder_list(context)
+    reminders.setdefault(chat_id, {})[message] = (timestamp, task)
+    await update_reminder_list(context, chat_id)
+
 
 
 async def snooze_reminder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -134,14 +139,21 @@ async def pin_reminders_command(update: Update, context: ContextTypes.DEFAULT_TY
 async def complete_reminder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    chat_id = query.message.chat_id
     _, message = query.data.split("|", 1)
+
     try:
-        await context.bot.delete_message(chat_id=query.message.chat_id, message_id=query.message.message_id)
+        await context.bot.delete_message(chat_id=chat_id, message_id=query.message.message_id)
     except:
         pass
-    if message in reminders:
-        del reminders[message]
-        await update_reminder_list(context)
+
+    if message in reminders.get(chat_id, {}):
+        _, task = reminders[chat_id][message]
+        if isinstance(task, asyncio.Task):
+            task.cancel()
+        del reminders[chat_id][message]
+        await update_reminder_list(context, chat_id)
+
 
 
 async def handle_removal_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -150,42 +162,35 @@ async def handle_removal_button(update: Update, context: ContextTypes.DEFAULT_TY
     chat_id = query.message.chat_id
 
     if query.data == "start_removal":
-        if reminders:
+        if reminders.get(chat_id):
             removal_state[chat_id] = {"mode": "removal", "target": None}
-        await update_reminder_list(context)
+        await update_reminder_list(context, chat_id)
 
     elif query.data.startswith("remove_reminder|"):
         _, msg_to_remove = query.data.split("|", 1)
         removal_state[chat_id] = {"mode": "confirm", "target": msg_to_remove}
-        await update_reminder_list(context)
+        await update_reminder_list(context, chat_id)
 
     elif query.data.startswith("confirm_delete|"):
         _, msg_to_remove = query.data.split("|", 1)
-        if msg_to_remove in reminders:
-            _, task = reminders[msg_to_remove]
+        if msg_to_remove in reminders.get(chat_id, {}):
+            _, task = reminders[chat_id][msg_to_remove]
             if isinstance(task, asyncio.Task):
                 task.cancel()
-            del reminders[msg_to_remove]
+            del reminders[chat_id][msg_to_remove]
         removal_state.pop(chat_id, None)
-        await update_reminder_list(context)
+        await update_reminder_list(context, chat_id)
 
     elif query.data == "cancel_confirm":
         if chat_id in removal_state and removal_state[chat_id]["mode"] == "confirm":
             removal_state[chat_id] = {"mode": "removal", "target": None}
-            await update_reminder_list(context)
+            await update_reminder_list(context, chat_id)
 
     elif query.data == "cancel_removal":
         removal_state.pop(chat_id, None)
-        await update_reminder_list(context)
+        await update_reminder_list(context, chat_id)
 
 
-# All helper and parser functions unchanged
-# (parse_time_prefix, parse_datetime_message, handle_message, help_command, etc.)
-# Only adding updated handlers to app below
-
-# -- Keep the rest of your helper functions and `handle_message` here (unchanged) --
-
-# APP SETUP
 def parse_time_prefix(text: str):
     match = re.match(r'(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?\s+(.*)', text.strip())
     if match:
@@ -258,29 +263,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     asyncio.create_task(delete_later(msg_id))
 
-    global reminder_list_chat_id
-    if reminder_list_chat_id is None:
-        reminder_list_chat_id = chat_id
-
-
     if text in ["delete all", "del all"]:
-        for _, task in reminders.values():
+        for _, task in reminders.get(chat_id, {}).values():
             if isinstance(task, asyncio.Task):
                 task.cancel()
-        reminders.clear()
-        await update_reminder_list(context)
+        reminders[chat_id] = {}
+        await update_reminder_list(context, chat_id)
         msg = await context.bot.send_message(chat_id=chat_id, text="🗑️ All reminders deleted.")
         asyncio.create_task(delete_later(msg.message_id))
         return
 
     if text.startswith("delete ") or text.startswith("del "):
         to_delete = text.replace("delete ", "", 1).replace("del ", "", 1).strip()
-        if to_delete in reminders:
-            _, task = reminders[to_delete]
+        if to_delete in reminders.get(chat_id, {}):
+            _, task = reminders[chat_id][to_delete]
             if isinstance(task, asyncio.Task):
                 task.cancel()
-            del reminders[to_delete]
-            await update_reminder_list(context)
+            del reminders[chat_id][to_delete]
+            await update_reminder_list(context, chat_id)
             msg = await context.bot.send_message(chat_id=chat_id, text=f"✅ Reminder \"{to_delete}\" deleted.")
         else:
             msg = await context.bot.send_message(chat_id=chat_id, text=f"⚠️ No reminder found with message: \"{to_delete}\"")
@@ -373,7 +373,7 @@ async def help_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             pass
 
 
-app = Application.builder().token("8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE").build()
+app = Application.builder().token("1014634066:AAGTFzlrmJQ7KSM4Bh98o2050IqiL508w5g").build()
 
 app.add_handler(CommandHandler("help", help_command))
 app.add_handler(CallbackQueryHandler(help_button_handler, pattern=r"^(collapse_help|uncollapse_help|delete_help)$"))
