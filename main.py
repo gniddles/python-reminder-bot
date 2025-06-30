@@ -8,6 +8,7 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 
+TOKEN = "8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE"
 reminders = {}  # chat_id: {message: (timestamp, task_or_id)}
 reminder_list_message_id = None
 reminder_list_chat_id = None
@@ -373,7 +374,7 @@ async def help_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             pass
 
 
-app = Application.builder().token("1014634066:AAGTFzlrmJQ7KSM4Bh98o2050IqiL508w5g").build()
+app = Application.builder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("help", help_command))
 app.add_handler(CallbackQueryHandler(help_button_handler, pattern=r"^(collapse_help|uncollapse_help|delete_help)$"))
