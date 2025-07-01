@@ -40,7 +40,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Send welcome message
     welcome = await update.message.reply_text(
-        "👋 Hello, this is a reminder chat bot. Use /help function to see how to use me. You can delete this message when you want"
+        "👋 Hello, this is a reminder chat bot. Use /help function to see how to use me. You can delete this message whenever you want"
     )
 
     # Schedule deletion of user's /start command after 5 seconds
@@ -165,12 +165,15 @@ async def snooze_reminder_handler(update: Update, context: ContextTypes.DEFAULT_
     chat_id = query.message.chat_id
     await send_scheduled_message(context, chat_id, message, snooze_seconds)
 
+
+
 async def pin_reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global reminder_list_pinned
     reminder_list_pinned = not reminder_list_pinned
     status = "enabled 📌" if reminder_list_pinned else "disabled ❌"
     await update.message.reply_text(f"Pinned reminders are now {status}.")
     await update_reminder_list(context)
+
 
 
 async def complete_reminder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -228,6 +231,7 @@ async def handle_removal_button(update: Update, context: ContextTypes.DEFAULT_TY
         await update_reminder_list(context, chat_id)
 
 
+
 def parse_time_prefix(text: str):
     match = re.match(r'(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?\s+(.*)', text.strip())
     if match:
@@ -239,6 +243,7 @@ def parse_time_prefix(text: str):
         if total_seconds > 0 and message:
             return total_seconds, message
     return None, None
+
 
 
 def parse_datetime_message(text: str):
@@ -284,6 +289,7 @@ def parse_datetime_message(text: str):
         return max((dt - now).total_seconds(), -1), message
 
     return None, None
+
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -356,6 +362,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(delete_later(msg.message_id))
 
 
+
 def get_help_keyboard(state="full"):
     if state == "full":
         return InlineKeyboardMarkup([
@@ -367,6 +374,7 @@ def get_help_keyboard(state="full"):
             [InlineKeyboardButton("📖 Uncollapse", callback_data="uncollapse_help"),
              InlineKeyboardButton("👝 Delete", callback_data="delete_help")]
         ])
+
 
 
 def get_full_help_text():
@@ -386,6 +394,7 @@ def get_full_help_text():
     )
 
 
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(get_full_help_text(), parse_mode="HTML", reply_markup=get_help_keyboard("full"))
     await asyncio.sleep(5)
@@ -393,6 +402,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.delete_message(chat_id=msg.chat.id, message_id=update.message.message_id)
     except:
         pass
+
 
 
 async def help_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -410,6 +420,7 @@ async def help_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             pass
 
 
+
 app = Application.builder().token(TOKEN).build()
 
 
@@ -423,7 +434,6 @@ app.add_handler(CallbackQueryHandler(snooze_reminder_handler, pattern=r"^snooze\
 
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.add_handler(MessageHandler(filters.COMMAND, unknown_command_handler))
-
 
 
 print("Bot is running...")
