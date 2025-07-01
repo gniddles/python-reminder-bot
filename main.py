@@ -16,8 +16,6 @@ removal_state = {}  # chat_id: {'mode': 'normal'|'confirm', 'target': str | None
 LOCAL_TIMEZONE = ZoneInfo("Europe/Kyiv")
 
 
-from telegram.ext import CommandHandler, MessageHandler, filters
-
 async def unknown_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     msg_id = update.message.message_id
@@ -33,6 +31,8 @@ async def unknown_command_handler(update: Update, context: ContextTypes.DEFAULT_
     reply = await update.message.reply_text("I didn’t understand that. Try again")
     asyncio.create_task(delete_later(msg_id))               # delete user’s command
     asyncio.create_task(delete_later(reply.message_id))     # delete bot’s reply
+
+
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -64,7 +64,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
-
 def get_removal_keyboard(chat_id=None):
     user_reminders = reminders.get(chat_id, {})
     if chat_id in removal_state:
@@ -89,7 +88,6 @@ def get_removal_keyboard(chat_id=None):
             [InlineKeyboardButton("🗑️ Remove Reminder", callback_data="start_removal")]
         ])
     return None
-
 
 
 
@@ -134,7 +132,6 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id=None)
 
 
 
-
 async def send_scheduled_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message: str, delay_seconds: int):
     timestamp = datetime.now(LOCAL_TIMEZONE).timestamp() + delay_seconds
 
@@ -153,8 +150,8 @@ async def send_scheduled_message(context: ContextTypes.DEFAULT_TYPE, chat_id: in
     task = asyncio.create_task(task_body())
     reminders.setdefault(chat_id, {})[message] = (timestamp, task)
     await update_reminder_list(context, chat_id)
-
-
+    
+    
 
 async def snooze_reminder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
