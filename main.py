@@ -12,7 +12,6 @@ TOKEN = "8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE"
 reminders = {}  # chat_id: {message: (timestamp, task_or_id)}
 reminder_list_message_ids = {}  # chat_id: message_id
 removal_state = {}  # chat_id: {'mode': 'normal'|'confirm', 'target': str | None}
-reminder_list_pinned = False
 
 LOCAL_TIMEZONE = ZoneInfo("Europe/Kyiv")
 
@@ -129,11 +128,6 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id=None)
             )
             reminder_list_message_ids[chat_id] = msg.message_id
 
-            if reminder_list_pinned:
-                try:
-                    await context.bot.pin_chat_message(chat_id=chat_id, message_id=msg.message_id, disable_notification=True)
-                except:
-                    pass
     except Exception as e:
         if "message to edit not found" in str(e).lower() or "message is not modified" not in str(e).lower():
             reminder_list_message_ids.pop(chat_id, None)
@@ -173,14 +167,6 @@ async def snooze_reminder_handler(update: Update, context: ContextTypes.DEFAULT_
     snooze_seconds = int(snooze_sec)
     chat_id = query.message.chat_id
     await send_scheduled_message(context, chat_id, message, snooze_seconds)
-
-async def pin_reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global reminder_list_pinned
-    reminder_list_pinned = not reminder_list_pinned
-    status = "enabled 📌" if reminder_list_pinned else "disabled ❌"
-    await update.message.reply_text(f"Pinned reminders are now {status}.")
-    await update_reminder_list(context)
-
 
 async def complete_reminder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -424,11 +410,12 @@ app = Application.builder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start_command))
 app.add_handler(CommandHandler("help", help_command))
-app.add_handler(CommandHandler("pin_reminders", pin_reminders_command))
+
 app.add_handler(CallbackQueryHandler(help_button_handler, pattern=r"^(collapse_help|uncollapse_help|delete_help)$"))
 app.add_handler(CallbackQueryHandler(complete_reminder_handler, pattern=r"^complete\|"))
 app.add_handler(CallbackQueryHandler(handle_removal_button, pattern=r"^(start_removal|remove_reminder\|.*|confirm_delete\|.*|cancel_confirm|cancel_removal)$"))
 app.add_handler(CallbackQueryHandler(snooze_reminder_handler, pattern=r"^snooze\|"))
+
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.add_handler(MessageHandler(filters.COMMAND, unknown_command_handler))
 
