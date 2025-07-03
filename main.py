@@ -17,7 +17,7 @@ from timezonefinder import TimezoneFinder
 from zoneinfo import ZoneInfo, available_timezones
 
 logging.basicConfig(level=logging.INFO)
-TOKEN = "1014634066:AAGTFzlrmJQ7KSM4Bh98o2050IqiL508w5g"
+TOKEN = "8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE"
 
 detect_prompt_ids = {}   # chat_id → message_id of location‑prompt
 reminders = {}  # chat_id: {message: (timestamp, task_or_id)}
