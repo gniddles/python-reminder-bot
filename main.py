@@ -1,19 +1,235 @@
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
+from telegram.error import Forbidden
 from telegram.ext import Application, MessageHandler, ContextTypes, filters, CommandHandler, CallbackQueryHandler
 import asyncio
 import re
 import logging
+import sqlite3
+from timezonefinder import TimezoneFinder
+from zoneinfo import ZoneInfo, available_timezones
 
 logging.basicConfig(level=logging.INFO)
+TOKEN = "1014634066:AAGTFzlrmJQ7KSM4Bh98o2050IqiL508w5g"
 
-TOKEN = "8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE"
+detect_prompt_ids = {}   # chat_id → message_id of location‑prompt
 reminders = {}  # chat_id: {message: (timestamp, task_or_id)}
 reminder_list_message_ids = {}  # chat_id: message_id
 removal_state = {}  # chat_id: {'mode': 'normal'|'confirm', 'target': str | None}
 
-LOCAL_TIMEZONE = ZoneInfo("Europe/Kyiv")
+DEFAULT_TZ = ZoneInfo("Europe/Kyiv")
+
+DB = sqlite3.connect("reminder_bot.db")
+DB.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        chat_id INTEGER PRIMARY KEY,
+        tz TEXT NOT NULL
+    )
+""")
+DB.commit()
+
+tf = TimezoneFinder()
+
+def get_chat_tz(chat_id: int) -> ZoneInfo:
+    row = DB.execute("SELECT tz FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
+    return ZoneInfo(row[0]) if row else DEFAULT_TZ
+
+def set_chat_tz(chat_id: int, tz_str: str):
+    DB.execute("INSERT OR REPLACE INTO users(chat_id, tz) VALUES(?, ?)", (chat_id, tz_str))
+    DB.commit()
+
+
+async def detect_timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    cmd_id = update.message.message_id
+
+    # delete the command message after 5 seconds
+    async def delayed_delete(chat_id, message_id, delay):
+        try:
+            await asyncio.sleep(delay)
+            await context.bot.delete_message(chat_id, message_id)
+        except Exception:
+            pass
+
+    asyncio.create_task(delayed_delete(chat_id, cmd_id, 5))
+
+    kb = [
+        [KeyboardButton("📍 Share Location", request_location=True)],
+        [KeyboardButton("❌ Cancel")]
+    ]
+    markup = ReplyKeyboardMarkup(kb, one_time_keyboard=True, resize_keyboard=True)
+
+    prompt = await update.message.reply_text(
+        "Please share your location to auto-detect your time-zone or tap Cancel:",
+        reply_markup=markup
+    )
+
+    detect_prompt_ids[chat_id] = prompt.message_id
+
+    # auto-delete the prompt after 60 seconds if still there
+    async def delete_prompt_later():
+        await asyncio.sleep(60)
+        mid = detect_prompt_ids.pop(chat_id, None)
+        if mid:
+            try:
+                await context.bot.delete_message(chat_id, mid)
+            except Exception:
+                pass
+    asyncio.create_task(delete_prompt_later())
+
+def delete_keyboard() -> InlineKeyboardMarkup:
+    """Inline keyboard with one Delete button."""
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🗑️ Delete", callback_data="delmsg")]]
+    )
+
+async def delete_own_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete the message containing the pressed Delete button."""
+    query = update.callback_query
+    await query.answer()  # acknowledge
+
+    try:
+        await context.bot.delete_message(chat_id=query.message.chat_id,
+                                         message_id=query.message.message_id)
+    except:
+        pass  # message may already be gone
+
+
+async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    loc_msg_id = update.message.message_id
+
+    # delete user's location msg after 1 s
+    asyncio.create_task(
+        asyncio.sleep(1)
+        .then(lambda *_: context.bot.delete_message(chat_id, loc_msg_id))
+        .catch(lambda *_: None)
+    )
+
+    # delete the prompt if visible
+    prompt_id = detect_prompt_ids.pop(chat_id, None)
+    if prompt_id:
+        try:
+            await context.bot.delete_message(chat_id, prompt_id)
+        except:
+            pass
+
+    # Determine time‑zone
+    loc = update.message.location
+    if loc:
+        tzname = tf.timezone_at(lat=loc.latitude, lng=loc.longitude)
+        if tzname and tzname in available_timezones():
+            set_chat_tz(chat_id, tzname)
+            reply_text = f"✅ Time‑zone detected and set to <b>{tzname}</b>."
+        else:
+            reply_text = (
+                "❌ Couldn't determine your time‑zone. "
+                "Set it manually with /timezone."
+            )
+    else:
+        reply_text = "⚠️ No location received."
+
+    # Send result
+    result_msg = await update.message.reply_text(
+        reply_text,
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+    # Delete result after 5 s
+    async def delete_result():
+        await asyncio.sleep(5)
+        try:
+            await context.bot.delete_message(chat_id, result_msg.message_id)
+        except:
+            pass
+    asyncio.create_task(delete_result())
+
+async def detect_cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    cancel_msg_id = update.message.message_id
+
+    # 1️⃣  Delete the user’s “❌ Cancel” message immediately
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=cancel_msg_id)
+    except Exception:
+        pass  # it might already be gone
+
+    # 2️⃣  Remove the location‑prompt, if it’s still on screen
+    prompt_id = detect_prompt_ids.pop(chat_id, None)
+    if prompt_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=prompt_id)
+        except Exception:
+            pass
+
+    # 3️⃣  (Optional) brief notice – auto‑deletes after 5 s
+    notice = await context.bot.send_message(
+        chat_id=chat_id,
+        text="❌ Location request cancelled.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+    async def delete_notice():
+        await asyncio.sleep(5)
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=notice.message_id)
+        except Exception:
+            pass
+
+    asyncio.create_task(delete_notice())
+
+async def timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    msg_id = update.message.message_id
+
+    # ⏳ Auto-delete user command after 5s
+    async def delete_later():
+        await asyncio.sleep(5)
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except:
+            pass
+    asyncio.create_task(delete_later())
+
+    # 🧠 Main logic
+    if not context.args:
+        current = get_chat_tz(chat_id).key
+        await update.message.reply_text(
+            f"Your current time‑zone is <b>{current}</b>.\n"
+            "Use /timezone <code>Region/City</code> to change it, e.g.:\n"
+            "<code>/timezone Europe/Paris</code>\n"
+            "Or type /dtz to detect it automatically.\n"
+            "If you are using a desktop version of telegram /dtz command wor't work",
+            parse_mode="HTML",
+            reply_markup=delete_keyboard()
+        )
+        return
+
+    tz_candidate = " ".join(context.args)
+    if tz_candidate not in available_timezones():
+        await update.message.reply_text(
+            "⚠️ Unknown time‑zone. Use a valid IANA identifier like "
+            "<code>America/New_York</code> or <code>Asia/Tokyo</code>.",
+            parse_mode="HTML",
+            reply_markup=delete_keyboard()
+        )
+        return
+
+    set_chat_tz(chat_id, tz_candidate)
+    await update.message.reply_text(
+        f"✅ Time‑zone set to <b>{tz_candidate}</b>.",
+        parse_mode="HTML",
+        reply_markup=delete_keyboard()
+    )
+
 
 
 async def unknown_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -36,33 +252,45 @@ async def unknown_command_handler(update: Update, context: ContextTypes.DEFAULT_
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    start_msg_id = update.message.message_id
+    msg_id = update.message.message_id
 
-    # Send welcome message
-    welcome = await update.message.reply_text(
-        "👋 Hello, this is a reminder chat bot. Use /help function to see how to use me. You can delete this message whenever you want"
-    )
-
-    # Schedule deletion of user's /start command after 5 seconds
-    async def delete_start_command():
+    # ⏳ Auto-delete the user's /start message after 5 seconds
+    async def delete_later():
         await asyncio.sleep(5)
         try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=start_msg_id)
+            await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
         except:
             pass
+    asyncio.create_task(delete_later())
 
-    # Schedule deletion of the welcome message after 5 minutes
-    async def delete_welcome_message():
-        await asyncio.sleep(300)  # 300 seconds = 5 minutes
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=welcome.message_id)
-        except:
-            pass
+    # 👋 Send welcome message
+    try:
+        welcome = await update.message.reply_text(
+            "👋 Hello, this is a reminder chat bot. Use /help to see how to use me. "
+            "You can delete this message whenever you want.",
+            reply_markup=delete_keyboard()
+        )
 
-    asyncio.create_task(delete_start_command())
-    asyncio.create_task(delete_welcome_message())
+        # Optional: auto-delete welcome message after 5 minutes (300s)
+        async def delete_welcome():
+            await asyncio.sleep(300)
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=welcome.message_id)
+            except:
+                pass
+        asyncio.create_task(delete_welcome())
+
+    except Exception as e:
+        logging.warning(f"Could not send welcome message: {e}")
 
 
+
+async def error_handler(update, context: ContextTypes.DEFAULT_TYPE):
+    if isinstance(context.error, Forbidden):
+        # Silently ignore – the user blocked the bot
+        context.application.logger.info("Message blocked – user has blocked the bot.")
+    else:
+        logging.exception("Unhandled exception", exc_info=context.error)
 
 def get_removal_keyboard(chat_id=None):
     user_reminders = reminders.get(chat_id, {})
@@ -91,16 +319,19 @@ def get_removal_keyboard(chat_id=None):
 
 
 
-async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id=None):
-    if chat_id is None:
-        return
-
+async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """
+    Edit (or create) the 📋 Upcoming Reminders message for this chat,
+    showing all reminders in the chat’s own time‑zone.
+    """
+    tz = get_chat_tz(chat_id)
     user_reminders = reminders.get(chat_id, {})
 
     if user_reminders:
         lines = ["📋 <b>Upcoming Reminders:</b>"]
+        # sort by absolute timestamp (UTC seconds)
         for msg, (ts, _) in sorted(user_reminders.items(), key=lambda x: x[1][0]):
-            time_str = datetime.fromtimestamp(ts, tz=LOCAL_TIMEZONE).strftime("%d %b %H:%M")
+            time_str = datetime.fromtimestamp(ts, tz=tz).strftime("%d %b %H:%M")
             lines.append(f"• <b>{msg}</b> at <i>{time_str}</i>")
         text = "\n".join(lines)
     else:
@@ -108,7 +339,6 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id=None)
 
     try:
         message_id = reminder_list_message_ids.get(chat_id)
-
         if message_id:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
@@ -125,31 +355,49 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id=None)
                 reply_markup=get_removal_keyboard(chat_id)
             )
             reminder_list_message_ids[chat_id] = msg.message_id
-
     except Exception as e:
-        if "message to edit not found" in str(e).lower() or "message is not modified" not in str(e).lower():
+        # If the message disappeared, forget its id so we can recreate it next time
+        if "message to edit not found" in str(e).lower():
             reminder_list_message_ids.pop(chat_id, None)
 
 
 
-async def send_scheduled_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message: str, delay_seconds: int):
-    timestamp = datetime.now(LOCAL_TIMEZONE).timestamp() + delay_seconds
+
+async def send_scheduled_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    message: str,
+    delay_seconds: int
+):
+    """
+    Schedule a reminder for this chat. We store an absolute Unix
+    timestamp (UTC seconds) so it remains valid if the chat later
+    changes its time‑zone.
+    """
+    # store absolute fire‑time
+    timestamp = datetime.now(get_chat_tz(chat_id)).timestamp() + delay_seconds
 
     async def task_body():
         await asyncio.sleep(delay_seconds)
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Complete", callback_data=f"complete|{message}"),
-                InlineKeyboardButton("🔁 Snooze 5m", callback_data=f"snooze|{message}|300")
-            ]
-        ])
-        sent_msg = await context.bot.send_message(chat_id=chat_id, text=f"⏰ Reminder: {message}", reply_markup=keyboard)
-        reminders.setdefault(chat_id, {})[message] = (timestamp, sent_msg.message_id)
+
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Complete", callback_data=f"complete|{message}"),
+            InlineKeyboardButton("🔁 Snooze 5m", callback_data=f"snooze|{message}|300")
+        ]])
+
+        sent = await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"⏰ Reminder: {message}",
+            reply_markup=keyboard
+        )
+        # On delivery we replace the stored task with the sent msg ID
+        reminders.setdefault(chat_id, {})[message] = (timestamp, sent.message_id)
         await update_reminder_list(context, chat_id)
 
     task = asyncio.create_task(task_body())
     reminders.setdefault(chat_id, {})[message] = (timestamp, task)
     await update_reminder_list(context, chat_id)
+
     
     
 
@@ -246,120 +494,148 @@ def parse_time_prefix(text: str):
 
 
 
-def parse_datetime_message(text: str):
-    now = datetime.now(LOCAL_TIMEZONE)
+def parse_datetime_message(text: str, tz: ZoneInfo):
+    """
+    Interpret phrases like ‘today 14:00 meeting’ or
+    ‘22 June 19:30 party’ relative to the supplied time‑zone.
 
+    Returns (delay_seconds, message) or (None, None) if no match.
+    If the given time is in the past, returns (-1, message) so the
+    caller can tell the user.
+    """
+    now = datetime.now(tz)
+
+    # relative words ───────────────────────────────────────────────
     patterns = [
         (r'day after tomorrow\s+(\d{1,2}):(\d{2})\s+(.+)', 2),
         (r'tomorrow\s+(\d{1,2}):(\d{2})\s+(.+)', 1),
         (r'today\s+(\d{1,2}):(\d{2})\s+(.+)', 0)
     ]
-
     for pattern, days in patterns:
-        match = re.match(pattern, text.strip())
-        if match:
-            hour, minute, message = match.groups()
-            dt = (now + timedelta(days=days)).replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
+        m = re.match(pattern, text.strip())
+        if m:
+            hour, minute, message = m.groups()
+            dt = (now + timedelta(days=days)).replace(
+                hour=int(hour), minute=int(minute),
+                second=0, microsecond=0
+            )
             return max((dt - now).total_seconds(), -1), message
 
-    match_full = re.match(r'(\d{1,2})\s+([a-z]+)\s+(\d{1,2}):(\d{2})\s+(.+)', text.strip(), re.IGNORECASE)
-    if match_full:
-        day, month_str, hour, minute, message = match_full.groups()
+    # full “22 June 19:30 …” ────────────────────────────────────────
+    m = re.match(r'(\d{1,2})\s+([a-z]+)\s+(\d{1,2}):(\d{2})\s+(.+)',
+                 text.strip(), re.IGNORECASE)
+    if m:
+        day, mon, hour, minute, message = m.groups()
         for fmt in ("%d %B %H:%M", "%d %b %H:%M"):
             try:
-                dt = datetime.strptime(f"{day} {month_str} {hour}:{minute}", fmt).replace(year=now.year, tzinfo=LOCAL_TIMEZONE)
+                dt = datetime.strptime(
+                    f"{day} {mon} {hour}:{minute}", fmt
+                ).replace(year=now.year, tzinfo=tz)
                 return max((dt - now).total_seconds(), -1), message
-            except:
-                continue
+            except ValueError:
+                pass  # try next fmt
 
-    match_partial = re.match(r'(\d{1,2})\s+([a-z]+)\s+(\d{1,2})\s+(.+)', text.strip(), re.IGNORECASE)
-    if match_partial:
-        day, month_str, hour, message = match_partial.groups()
+    # partial “22 June 8 walk” (hour only) ─────────────────────────
+    m = re.match(r'(\d{1,2})\s+([a-z]+)\s+(\d{1,2})\s+(.+)',
+                 text.strip(), re.IGNORECASE)
+    if m:
+        day, mon, hour, message = m.groups()
         for fmt in ("%d %B %H:%M", "%d %b %H:%M"):
             try:
-                dt = datetime.strptime(f"{day} {month_str} {hour}:00", fmt).replace(year=now.year, tzinfo=LOCAL_TIMEZONE)
+                dt = datetime.strptime(
+                    f"{day} {mon} {hour}:00", fmt
+                ).replace(year=now.year, tzinfo=tz)
                 return max((dt - now).total_seconds(), -1), message
-            except:
-                continue
+            except ValueError:
+                pass
 
-    match_time = re.match(r'(\d{1,2}):(\d{2})\s+(.+)', text.strip())
-    if match_time:
-        hour, minute, message = match_time.groups()
-        dt = now.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
+    # plain “14:00 …” ──────────────────────────────────────────────
+    m = re.match(r'(\d{1,2}):(\d{2})\s+(.+)', text.strip())
+    if m:
+        hour, minute, message = m.groups()
+        dt = now.replace(hour=int(hour), minute=int(minute),
+                         second=0, microsecond=0)
         return max((dt - now).total_seconds(), -1), message
 
     return None, None
 
 
 
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    tz = get_chat_tz(chat_id)          # 👈 per‑chat zone
     msg_id = update.message.message_id
     text = update.message.text.lower()
 
-    async def delete_later(mid):
-        await asyncio.sleep(5)
+    # helper to auto‑delete temp messages
+    async def delete_later(mid, delay=5):
+        await asyncio.sleep(delay)
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=mid)
         except:
             pass
-
     asyncio.create_task(delete_later(msg_id))
 
-    if text in ["delete all", "del all"]:
+    # ---- delete all ----------------------------------------------------------
+    if text in {"delete all", "del all"}:
         for _, task in reminders.get(chat_id, {}).values():
             if isinstance(task, asyncio.Task):
                 task.cancel()
         reminders[chat_id] = {}
         await update_reminder_list(context, chat_id)
-        msg = await context.bot.send_message(chat_id=chat_id, text="🗑️ All reminders deleted.")
-        asyncio.create_task(delete_later(msg.message_id))
+        m = await context.bot.send_message(chat_id, "🗑️ All reminders deleted.")
+        asyncio.create_task(delete_later(m.message_id))
         return
 
-    if text.startswith("delete ") or text.startswith("del "):
-        to_delete = text.replace("delete ", "", 1).replace("del ", "", 1).strip()
-        if to_delete in reminders.get(chat_id, {}):
-            _, task = reminders[chat_id][to_delete]
+    # ---- delete single -------------------------------------------------------
+    if text.startswith(("delete ", "del ")):
+        target = text.split(maxsplit=1)[1]
+        if target in reminders.get(chat_id, {}):
+            _, task = reminders[chat_id][target]
             if isinstance(task, asyncio.Task):
                 task.cancel()
-            del reminders[chat_id][to_delete]
+            del reminders[chat_id][target]
             await update_reminder_list(context, chat_id)
-            msg = await context.bot.send_message(chat_id=chat_id, text=f"✅ Reminder \"{to_delete}\" deleted.")
+            m = await context.bot.send_message(chat_id, f"✅ Reminder “{target}” deleted.")
         else:
-            msg = await context.bot.send_message(chat_id=chat_id, text=f"⚠️ No reminder found with message: \"{to_delete}\"")
-        asyncio.create_task(delete_later(msg.message_id))
+            m = await context.bot.send_message(chat_id, f"⚠️ No reminder named “{target}”.")
+        asyncio.create_task(delete_later(m.message_id))
         return
 
+    # ---- show current time ---------------------------------------------------
     if "time" in text:
-        now = datetime.now(LOCAL_TIMEZONE)
-        msg = await context.bot.send_message(chat_id=chat_id, text=f"Current time: {now.strftime('%H:%M:%S')}")
-        asyncio.create_task(delete_later(msg.message_id))
+        now = datetime.now(tz)
+        m = await context.bot.send_message(chat_id, f"Current time: {now:%H:%M:%S}")
+        asyncio.create_task(delete_later(m.message_id))
         return
 
-    delay_dt, message_dt = parse_datetime_message(text)
+    # ---- natural‑language date/time -----------------------------------------
+    delay_dt, msg_dt = parse_datetime_message(text, tz)
     if delay_dt == -1:
-        msg = await context.bot.send_message(chat_id=chat_id, text="⏰ This time has already passed.")
-        asyncio.create_task(delete_later(msg.message_id))
+        m = await context.bot.send_message(chat_id, "⏰ This time has already passed.")
+        asyncio.create_task(delete_later(m.message_id))
         return
-    elif delay_dt is not None:
-        msg = await context.bot.send_message(chat_id=chat_id, text="⏳ Reminder scheduled!")
-        asyncio.create_task(delete_later(msg.message_id))
-        asyncio.create_task(send_scheduled_message(context, chat_id, message_dt, delay_dt))
-        return
-
-    delay_seconds, reminder_message = parse_time_prefix(text)
-    if delay_seconds:
-        msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"⏳ Reminder set in {delay_seconds // 60} minutes"
-                 f"{' and ' + str(delay_seconds % 60) + ' seconds' if delay_seconds % 60 else ''}!"
-        )
-        asyncio.create_task(delete_later(msg.message_id))
-        asyncio.create_task(send_scheduled_message(context, chat_id, reminder_message, delay_seconds))
+    if delay_dt is not None:
+        m = await context.bot.send_message(chat_id, "⏳ Reminder scheduled!")
+        asyncio.create_task(delete_later(m.message_id))
+        asyncio.create_task(send_scheduled_message(context, chat_id, msg_dt, int(delay_dt)))
         return
 
-    msg = await context.bot.send_message(chat_id=chat_id, text="I didn’t understand that. Try again")
-    asyncio.create_task(delete_later(msg.message_id))
+    # ---- “10m feed cat” style ----------------------------------------------
+    delay_s, msg_rel = parse_time_prefix(text)
+    if delay_s:
+        mins, secs = divmod(delay_s, 60)
+        text_delay = f"{mins} minutes" + (f" {secs} seconds" if secs else "")
+        m = await context.bot.send_message(chat_id, f"⏳ Reminder set in {text_delay}!")
+        asyncio.create_task(delete_later(m.message_id))
+        asyncio.create_task(send_scheduled_message(context, chat_id, msg_rel, delay_s))
+        return
+
+    # ---- fallback ------------------------------------------------------------
+    m = await context.bot.send_message(chat_id, "I didn’t understand that. Try again.")
+    asyncio.create_task(delete_later(m.message_id))
+
 
 
 
@@ -426,12 +702,19 @@ app = Application.builder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start_command))
 app.add_handler(CommandHandler("help", help_command))
+app.add_handler(CommandHandler("timezone", timezone_command))
+app.add_handler(CommandHandler("dtz", detect_timezone_command))
 
 app.add_handler(CallbackQueryHandler(help_button_handler, pattern=r"^(collapse_help|uncollapse_help|delete_help)$"))
 app.add_handler(CallbackQueryHandler(complete_reminder_handler, pattern=r"^complete\|"))
 app.add_handler(CallbackQueryHandler(handle_removal_button, pattern=r"^(start_removal|remove_reminder\|.*|confirm_delete\|.*|cancel_confirm|cancel_removal)$"))
 app.add_handler(CallbackQueryHandler(snooze_reminder_handler, pattern=r"^snooze\|"))
+app.add_handler(CallbackQueryHandler(delete_own_message_handler, pattern=r"^delmsg$"))
+app.add_handler(MessageHandler(filters.Regex(r'^❌\s*Cancel$'), detect_cancel_handler))
 
+
+app.add_handler(MessageHandler(filters.LOCATION, location_handler))
+app.add_error_handler(error_handler)
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.add_handler(MessageHandler(filters.COMMAND, unknown_command_handler))
 
