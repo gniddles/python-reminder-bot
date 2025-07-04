@@ -33,7 +33,21 @@ DB.execute("""
         tz TEXT NOT NULL
     )
 """)
+# ─── 1️⃣  Add these two tables right after you create the “users” table ───
+DB.execute("""
+CREATE TABLE IF NOT EXISTS user_notes_mode (
+    chat_id INTEGER PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0
+)""")
+DB.execute("""
+CREATE TABLE IF NOT EXISTS notes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id    INTEGER NOT NULL,
+    note       TEXT    NOT NULL,
+    message_id INTEGER
+)""")
 DB.commit()
+
 
 tf = TimezoneFinder()
 
@@ -83,6 +97,101 @@ async def detect_timezone_command(update: Update, context: ContextTypes.DEFAULT_
             except Exception:
                 pass
     asyncio.create_task(delete_prompt_later())
+
+# ─── 2️⃣  Helper DB‑wrapper functions (put near get_chat_tz / set_chat_tz) ───
+def notes_enabled(chat_id: int) -> bool:
+    row = DB.execute("SELECT enabled FROM user_notes_mode WHERE chat_id = ?", (chat_id,)).fetchone()
+    return bool(row[0]) if row else False
+
+def set_notes_enabled(chat_id: int, enabled: bool):
+    DB.execute(
+        "INSERT OR REPLACE INTO user_notes_mode(chat_id, enabled) VALUES(?, ?)",
+        (chat_id, int(enabled))
+    )
+    DB.commit()
+
+def add_note(chat_id: int, text: str, message_id: int):
+    DB.execute(
+        "INSERT INTO notes(chat_id, note, message_id) VALUES(?,?,?)",
+        (chat_id, text, message_id)
+    )
+    DB.commit()
+
+def delete_note(chat_id: int, note_id: int):
+    DB.execute("DELETE FROM notes WHERE id=? AND chat_id=?", (note_id, chat_id))
+    DB.commit()
+
+def fetch_notes(chat_id: int):
+    return DB.execute("SELECT id, note FROM notes WHERE chat_id=?", (chat_id,)).fetchall()
+
+# ─── 3️⃣  /notes toggle command ───
+async def notes_toggle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    cmd_mid = update.message.message_id
+
+    new_state = not notes_enabled(chat_id)
+    set_notes_enabled(chat_id, new_state)
+
+    reply = await update.message.reply_text(
+        f"Notes mode is now <b>{'ON 📝' if new_state else 'OFF'}</b>.",
+        parse_mode="HTML",
+        reply_markup=delete_keyboard()
+    )
+
+    async def _cleanup():
+        await asyncio.sleep(5)
+        for mid in (cmd_mid, reply.message_id):
+            try:
+                await context.bot.delete_message(chat_id, mid)
+            except:
+                pass
+    asyncio.create_task(_cleanup())
+
+# ── UPDATED send_note helper  ───────────────────────────────────
+async def send_note(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str):
+    # 1. Send temporary message with placeholder callback data
+    tmp_kb = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("✅ Complete", callback_data="noop")]]
+    )
+    sent = await context.bot.send_message(chat_id, text, reply_markup=tmp_kb)
+
+    # 2. Store note and get its DB id
+    cur = DB.cursor()
+    cur.execute(
+        "INSERT INTO notes(chat_id, note, message_id) VALUES (?,?,?)",
+        (chat_id, text, sent.message_id)
+    )
+    note_id = cur.lastrowid
+    DB.commit()
+
+    # 3. Update the button with correct callback containing note_id
+    kb = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("✅ Complete", callback_data=f"complete_note|{note_id}")]]
+    )
+    await context.bot.edit_message_reply_markup(
+        chat_id=chat_id,
+        message_id=sent.message_id,
+        reply_markup=kb
+    )
+
+    # 4. Refresh the 📋 list
+    await update_reminder_list(context, chat_id)
+
+
+async def complete_note_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, note_id = query.data.split("|", 1)
+    note_id = int(note_id)
+    chat_id = query.message.chat_id
+
+    try:
+        await context.bot.delete_message(chat_id, query.message.message_id)
+    except:
+        pass
+
+    delete_note(chat_id, note_id)
+    await update_reminder_list(context, chat_id)
 
 def delete_keyboard() -> InlineKeyboardMarkup:
     """Inline keyboard with one Delete button."""
@@ -321,46 +430,50 @@ def get_removal_keyboard(chat_id=None):
 
 
 
+# ── UPDATED update_reminder_list  ───────────────────────────────
 async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    """
-    Edit (or create) the 📋 Upcoming Reminders message for this chat,
-    showing all reminders in the chat’s own time‑zone.
-    """
     tz = get_chat_tz(chat_id)
     user_reminders = reminders.get(chat_id, {})
+    user_notes = fetch_notes(chat_id)
 
-    if user_reminders:
-        lines = ["📋 <b>Upcoming Reminders:</b>"]
-        # sort by absolute timestamp (UTC seconds)
-        for msg, (ts, _) in sorted(user_reminders.items(), key=lambda x: x[1][0]):
-            time_str = datetime.fromtimestamp(ts, tz=tz).strftime("%d %b %H:%M")
-            lines.append(f"• <b>{msg}</b> at <i>{time_str}</i>")
-        text = "\n".join(lines)
-    else:
+    # Compose text
+    if not user_reminders and not user_notes:
         text = "📋 <b>No upcoming reminders.</b>"
+    else:
+        lines = ["📋 <b>Upcoming Reminders:</b>"]
+        # timed reminders
+        for msg, (ts, _) in sorted(user_reminders.items(), key=lambda x: x[1][0]):
+            tstr = datetime.fromtimestamp(ts, tz=tz).strftime("%d %b %H:%M")
+            lines.append(f"• <b>{msg}</b> at <i>{tstr}</i>")
+        # notes
+        for _, note_txt in user_notes:
+            lines.append(f"• <b>{note_txt}</b>")
+        text = "\n".join(lines)
 
+    # Send or edit the list message
+    mid = reminder_list_message_ids.get(chat_id)
     try:
-        message_id = reminder_list_message_ids.get(chat_id)
-        if message_id:
+        if mid:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
-                message_id=message_id,
+                message_id=mid,
                 text=text,
-                parse_mode="HTML",
-                reply_markup=get_removal_keyboard(chat_id)
+                parse_mode="HTML"
             )
         else:
             msg = await context.bot.send_message(
                 chat_id=chat_id,
                 text=text,
-                parse_mode="HTML",
-                reply_markup=get_removal_keyboard(chat_id)
+                parse_mode="HTML"
             )
             reminder_list_message_ids[chat_id] = msg.message_id
     except Exception as e:
-        # If the message disappeared, forget its id so we can recreate it next time
+        # If the message was deleted manually, forget its id
         if "message to edit not found" in str(e).lower():
             reminder_list_message_ids.pop(chat_id, None)
+
+
+
 
 
 
@@ -634,7 +747,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(send_scheduled_message(context, chat_id, msg_rel, delay_s))
         return
 
-    # ---- fallback ------------------------------------------------------------
+    # ── fallback ──
+    if notes_enabled(chat_id):
+        await send_note(context, chat_id, update.message.text)
+        return
+
     m = await context.bot.send_message(chat_id, "I didn’t understand that. Try again.")
     asyncio.create_task(delete_later(m.message_id))
 
@@ -706,7 +823,9 @@ app.add_handler(CommandHandler("start", start_command))
 app.add_handler(CommandHandler("help", help_command))
 app.add_handler(CommandHandler("timezone", timezone_command))
 app.add_handler(CommandHandler("dtz", detect_timezone_command))
+app.add_handler(CommandHandler("notes", notes_toggle_command))
 
+app.add_handler(CallbackQueryHandler(complete_note_handler, pattern=r"^complete_note\|"))
 app.add_handler(CallbackQueryHandler(help_button_handler, pattern=r"^(collapse_help|uncollapse_help|delete_help)$"))
 app.add_handler(CallbackQueryHandler(complete_reminder_handler, pattern=r"^complete\|"))
 app.add_handler(CallbackQueryHandler(handle_removal_button, pattern=r"^(start_removal|remove_reminder\|.*|confirm_delete\|.*|cancel_confirm|cancel_removal)$"))
