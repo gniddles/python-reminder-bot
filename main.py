@@ -103,25 +103,27 @@ async def delete_own_message_handler(update: Update, context: ContextTypes.DEFAU
 
 
 async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+    chat_id    = update.effective_chat.id
     loc_msg_id = update.message.message_id
 
-    # delete user's location msg after 1 s
-    asyncio.create_task(
-        asyncio.sleep(1)
-        .then(lambda *_: context.bot.delete_message(chat_id, loc_msg_id))
-        .catch(lambda *_: None)
-    )
+    # delete the location message after 2 s
+    async def delete_location():
+        await asyncio.sleep(2)
+        try:
+            await context.bot.delete_message(chat_id, loc_msg_id)
+        except Exception:
+            pass
+    asyncio.create_task(delete_location())
 
-    # delete the prompt if visible
+    # delete the prompt, if it is still on screen
     prompt_id = detect_prompt_ids.pop(chat_id, None)
     if prompt_id:
         try:
             await context.bot.delete_message(chat_id, prompt_id)
-        except:
+        except Exception:
             pass
 
-    # Determine time‑zone
+    # determine the time‑zone
     loc = update.message.location
     if loc:
         tzname = tf.timezone_at(lat=loc.latitude, lng=loc.longitude)
@@ -136,21 +138,21 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         reply_text = "⚠️ No location received."
 
-    # Send result
+    # send result and auto‑delete it after 5 s
     result_msg = await update.message.reply_text(
         reply_text,
         parse_mode="HTML",
         reply_markup=ReplyKeyboardRemove()
     )
 
-    # Delete result after 5 s
     async def delete_result():
         await asyncio.sleep(5)
         try:
             await context.bot.delete_message(chat_id, result_msg.message_id)
-        except:
+        except Exception:
             pass
     asyncio.create_task(delete_result())
+
 
 async def detect_cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
