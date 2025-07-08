@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo, available_timezones
 logging.basicConfig(level=logging.INFO)
 TOKEN = "8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE"
 
+datetime.now(timezone.utc)
 detect_prompt_ids = {}   # chat_id → message_id of location‑prompt
 reminders = {}  # chat_id: {message: (timestamp, task_or_id)}
 reminder_list_message_ids = {}  # chat_id: message_id
@@ -107,11 +108,18 @@ def db_update_reminder(chat_id: int, text: str, new_fire_at: int):
     DB.commit()
 
 def db_fetch_future():
-    now = int(datetime.utcnow().timestamp())
+    now_ts = int(datetime.now(timezone.utc).timestamp())           # changed
     return DB.execute(
         "SELECT chat_id, text, fire_at FROM reminders WHERE fire_at>?",
-        (now,)
+        (now_ts,)
     ).fetchall()
+
+def db_delete_all_reminders(chat_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM reminders WHERE chat_id = ?", (chat_id,))
+    conn.commit()
+    conn.close()
 
 async def detect_timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -553,18 +561,12 @@ async def send_scheduled_message(
     message: str,
     delay_seconds: int,
     *,
-    store_in_db: bool = True          # ← internal switch used by restore
+    store_in_db: bool = True
 ):
-    """
-    Schedule a reminder that survives bot restarts.
+    fire_at = int(datetime.now(timezone.utc).timestamp()           # changed
+                  + delay_seconds)
 
-    The reminder is **also** kept in the in‑memory `reminders` dict so the
-    rest of your UI (delete buttons, upcoming list, …) keeps working
-    exactly as before.
-    """
-    fire_at = int(datetime.utcnow().timestamp() + delay_seconds)
-
-    if store_in_db:                       # don’t double‑insert on restore
+    if store_in_db:
         db_add_reminder(chat_id, message, fire_at)
 
     # async job ----------------------------------------------------------
@@ -867,7 +869,7 @@ async def restore_tasks_on_startup(app: Application):
 
     # ② schedule pending reminders -------------------------------------
     chats_touched: set[int] = set()
-    now_ts = int(datetime.utcnow().timestamp())
+    now_ts = int(datetime.now(timezone.utc).timestamp())
 
     for chat_id, text, fire_at in db_fetch_future():
         delay = fire_at - now_ts
