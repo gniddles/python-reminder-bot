@@ -34,7 +34,6 @@ DB.execute("""
         tz TEXT NOT NULL
     )
 """)
-# ─── 1️⃣  Add these two tables right after you create the “users” table ───
 DB.execute("""
 CREATE TABLE IF NOT EXISTS user_notes_mode (
     chat_id INTEGER PRIMARY KEY,
