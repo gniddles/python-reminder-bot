@@ -894,6 +894,32 @@ def get_help_keyboard(state="full"):
              InlineKeyboardButton("👝 Delete", callback_data="delete_help")]
         ])
 
+async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send (or refresh) the single 📋 Upcoming Reminders message.
+
+    /reminders           → edit existing list or create one if missing
+    /reminders new|fresh → always create a brand‑new list message
+    """
+    chat_id = update.effective_chat.id
+    cmd_mid = update.message.message_id      # so we can delete it later
+
+    # ---- optional force‑fresh variant ---------------------------------
+    if context.args and context.args[0].lower() in {"new", "fresh"}:
+        # forget any stored message‑id so update_reminder_list will send a new one
+        reminder_list_message_ids.pop(chat_id, None)
+        db_delete_list_msg_id(chat_id)
+
+    # ---- (re)build the list ------------------------------------------
+    await update_reminder_list(context, chat_id)
+
+    # ---- auto‑delete the user’s command after 5 s ---------------------
+    async def _cleanup():
+        await asyncio.sleep(5)
+        try:
+            await context.bot.delete_message(chat_id, cmd_mid)
+        except Exception:
+            pass
+    asyncio.create_task(_cleanup())
 
 
 def get_full_help_text():
@@ -952,6 +978,10 @@ app.add_handler(CommandHandler("help", help_command))
 app.add_handler(CommandHandler("timezone", timezone_command))
 app.add_handler(CommandHandler("dtz", detect_timezone_command))
 app.add_handler(CommandHandler("notes", notes_toggle_command))
+app.add_handler(
+    CommandHandler(["reminders", "list", "upcoming"], reminders_command)
+)
+
 
 app.add_handler(CallbackQueryHandler(complete_note_handler, pattern=r"^complete_note\|"))
 app.add_handler(CallbackQueryHandler(help_button_handler, pattern=r"^(collapse_help|uncollapse_help|delete_help)$"))
