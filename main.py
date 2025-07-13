@@ -655,7 +655,6 @@ async def handle_removal_button(update: Update, context: ContextTypes.DEFAULT_TY
             db_delete_reminder(chat_id, target)
         elif state.get("type") == "note":
             note_id = int(target)
-            # Get message_id to delete from chat
             row = DB.execute(
                 "SELECT message_id FROM notes WHERE id=? AND chat_id=?",
                 (note_id, chat_id)
@@ -679,7 +678,6 @@ async def handle_removal_button(update: Update, context: ContextTypes.DEFAULT_TY
         removal_state.pop(chat_id, None)
         await update_reminder_list(context, chat_id)
 
-
 def parse_time_prefix(text: str):
     match = re.match(r'(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?\s+(.*)', text.strip())
     if match:
@@ -691,8 +689,6 @@ def parse_time_prefix(text: str):
         if total_seconds > 0 and message:
             return total_seconds, message
     return None, None
-
-
 
 def parse_datetime_message(text: str, tz: ZoneInfo):
     """
@@ -751,11 +747,7 @@ def parse_datetime_message(text: str, tz: ZoneInfo):
         dt = now.replace(hour=int(hour), minute=int(minute),
                          second=0, microsecond=0)
         return max((dt - now).total_seconds(), -1), message
-
     return None, None
-
-
-
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -784,8 +776,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text.startswith(("delete ", "del ")):
         target = text.split(maxsplit=1)[1]
-
-        # Try deleting reminder
         if target in reminders.get(chat_id, {}):
             _, handle = reminders[chat_id][target]
             if isinstance(handle, asyncio.Task):
@@ -796,8 +786,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             m = await context.bot.send_message(chat_id, f"✅ Reminder “{target}” deleted.")
             asyncio.create_task(delete_later(m.message_id))
             return
-
-        # Try deleting note
+        
         row = DB.execute("SELECT id, message_id FROM notes WHERE note=? AND chat_id=?", (target, chat_id)).fetchone()
         if row:
             note_id, message_id = row
@@ -812,7 +801,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             m = await context.bot.send_message(chat_id, f"⚠️ No reminder or note named “{target}”.")
         asyncio.create_task(delete_later(m.message_id))
         return
-
 
     if "time" in text:
         now = datetime.now(tz)
@@ -874,7 +862,6 @@ async def restore_tasks_on_startup(app: Application):
     for chat_id in chats_touched:
         await update_reminder_list(ctx, chat_id)
 
-
 def get_help_keyboard(state="full"):
     if state == "full":
         return InlineKeyboardMarkup([
@@ -886,7 +873,6 @@ def get_help_keyboard(state="full"):
             [InlineKeyboardButton("📖 Uncollapse", callback_data="uncollapse_help"),
              InlineKeyboardButton("👝 Delete", callback_data="delete_help")]
         ])
-
 async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send (or refresh) the single 📋 Upcoming Reminders message.
 
@@ -895,7 +881,6 @@ async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     chat_id = update.effective_chat.id
     cmd_mid = update.message.message_id
-
     if context.args and context.args[0].lower() in {"new", "fresh"}:
         reminder_list_message_ids.pop(chat_id, None)
         db_delete_list_msg_id(chat_id)
@@ -908,7 +893,6 @@ async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
     asyncio.create_task(_cleanup())
-
 
 def get_full_help_text():
     return (
@@ -926,8 +910,6 @@ def get_full_help_text():
         "Use the buttons below to collapse or delete this message."
     )
 
-
-
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(get_full_help_text(), parse_mode="HTML", reply_markup=get_help_keyboard("full"))
     await asyncio.sleep(5)
@@ -935,8 +917,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.delete_message(chat_id=msg.chat.id, message_id=update.message.message_id)
     except:
         pass
-
-
 
 async def help_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -951,8 +931,6 @@ async def help_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             await context.bot.delete_message(chat_id=query.message.chat_id, message_id=query.message.message_id)
         except:
             pass
-
-
 
 app = (
     Application.builder()
