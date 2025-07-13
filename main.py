@@ -15,7 +15,6 @@ import logging
 import sqlite3
 from timezonefinder import TimezoneFinder
 from zoneinfo import ZoneInfo, available_timezones
-import os
 
 logging.basicConfig(level=logging.INFO)
 TOKEN = "8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE"
