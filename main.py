@@ -15,9 +15,10 @@ import logging
 import sqlite3
 from timezonefinder import TimezoneFinder
 from zoneinfo import ZoneInfo, available_timezones
+import os
 
 logging.basicConfig(level=logging.INFO)
-TOKEN = "8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE"
+TOKEN = os.getenv("BOT_TOKEN")
 
 datetime.now(timezone.utc)
 detect_prompt_ids = {}
@@ -28,7 +29,9 @@ editing_state = {}
 
 DEFAULT_TZ = ZoneInfo("Europe/Kyiv")
 
-DB = sqlite3.connect("reminder_bot.db")
+DB_PATH = os.path.join(os.getenv("RENDER_DISK_ROOT", "."), "reminder_bot.db")
+DB = sqlite3.connect(DB_PATH)
+
 DB.execute("""
     CREATE TABLE IF NOT EXISTS users (
         chat_id INTEGER PRIMARY KEY,

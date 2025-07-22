@@ -1,0 +1,12 @@
+services:
+  - type: worker
+    name: telegram-reminder-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+    disk:
+      name: data
+      mountPath: /var/data
