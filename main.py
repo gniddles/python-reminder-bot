@@ -12,9 +12,9 @@ from telegram.ext import Application, MessageHandler, ContextTypes, filters, Com
 import asyncio
 import re
 import logging
-import sqlite3
 from timezonefinder import TimezoneFinder
 from zoneinfo import ZoneInfo, available_timezones
+from db import get_conn
 
 logging.basicConfig(level=logging.INFO)
 TOKEN = "1014634066:AAGTFzlrmJQ7KSM4Bh98o2050IqiL508w5g"
@@ -28,7 +28,6 @@ editing_state = {}
 
 DEFAULT_TZ = ZoneInfo("Europe/Kyiv")
 
-DB = sqlite3.connect("reminder_bot_copy.db")
 DB.execute("""
     CREATE TABLE IF NOT EXISTS users (
         chat_id INTEGER PRIMARY KEY,
@@ -59,46 +58,68 @@ DB.commit()
 tf = TimezoneFinder()
 
 def db_get_list_msg_id(chat_id: int) -> int | None:
-    row = DB.execute(
-        "SELECT list_msg_id FROM reminder_meta WHERE chat_id=?",
-        (chat_id,)
-    ).fetchone()
-    return row[0] if row else None
-
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT list_msg_id FROM reminder_meta WHERE chat_id = %s",
+                (chat_id,)
+            )
+            row = cur.fetchone()
+            return row["list_msg_id"] if row else None
 
 def db_set_list_msg_id(chat_id: int, msg_id: int):
-    DB.execute(
-        "INSERT OR REPLACE INTO reminder_meta(chat_id, list_msg_id) VALUES (?,?)",
-        (chat_id, msg_id)
-    )
-    DB.commit()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO reminder_meta (chat_id, list_msg_id)
+                VALUES (%s, %s)
+                ON CONFLICT (chat_id) DO UPDATE SET list_msg_id = EXCLUDED.list_msg_id
+                """,
+                (chat_id, msg_id)
+            )
 
 
 def db_delete_list_msg_id(chat_id: int):
-    DB.execute("DELETE FROM reminder_meta WHERE chat_id=?", (chat_id,))
-    DB.commit()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM reminder_meta WHERE chat_id = %s", (chat_id,))
+
 
 def get_chat_tz(chat_id: int) -> ZoneInfo:
     row = DB.execute("SELECT tz FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
     return ZoneInfo(row[0]) if row else DEFAULT_TZ
 
 def set_chat_tz(chat_id: int, tz_str: str):
-    DB.execute("INSERT OR REPLACE INTO users(chat_id, tz) VALUES(?, ?)", (chat_id, tz_str))
-    DB.commit()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO users (chat_id, tz)
+                VALUES (%s, %s)
+                ON CONFLICT (chat_id) DO UPDATE SET tz = EXCLUDED.tz
+                """,
+                (chat_id, tz_str)
+            )
 
 def db_add_reminder(chat_id: int, text: str, fire_at: int):
-    DB.execute(
-        "INSERT INTO reminders(chat_id, text, fire_at) VALUES(?,?,?)",
-        (chat_id, text, fire_at)
-    )
-    DB.commit()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO reminders (chat_id, text, fire_at)
+                VALUES (%s, %s, %s)
+                """,
+                (chat_id, text, fire_at)
+            )
 
 def db_delete_reminder(chat_id: int, text: str):
-    DB.execute(
-        "DELETE FROM reminders WHERE chat_id=? AND text=?",
-        (chat_id, text)
-    )
-    DB.commit()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM reminders WHERE chat_id = %s AND text = %s",
+                (chat_id, text)
+            )
 
 def db_update_reminder(chat_id: int, text: str, new_fire_at: int):
     DB.execute(
