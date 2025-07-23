@@ -115,7 +115,7 @@ def db_fetch_future():
     ).fetchall()
 
 def db_delete_all_reminders(chat_id: int):
-    conn = sqlite3.connect(DB_PATH) # type: ignore
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM reminders WHERE chat_id = ?", (chat_id,))
     conn.commit()
@@ -473,8 +473,6 @@ def get_removal_keyboard(chat_id=None):
 
             return InlineKeyboardMarkup(buttons)
 
-
-    # This is the default view (outside of any mode)
     if user_reminders or user_notes:
         return InlineKeyboardMarkup([
             [
@@ -813,7 +811,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    asyncio.create_task(delete_later(msg_id))  # Delete user message in all cases
+    asyncio.create_task(delete_later(msg_id))
 
     if chat_id in editing_state:
         state = editing_state.pop(chat_id)
@@ -837,7 +835,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         text,
                         fire_at - int(datetime.now(timezone.utc).timestamp())
                     )
-                elif isinstance(handle, int):  # already-sent message_id
+                elif isinstance(handle, int):
                     try:
                         keyboard = InlineKeyboardMarkup([
                             [
@@ -854,7 +852,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         reminders[chat_id][text] = (fire_at, handle)
                         db_delete_reminder(chat_id, original)
                     except:
-                        # fallback if message edit fails
                         await send_scheduled_message(
                             context,
                             chat_id,
@@ -864,7 +861,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update_reminder_list(context, chat_id)
                 return
             else:
-                return  # original no longer exists, no need to reply
+                return
 
         elif state["type"] == "note":
             note_id = state["note_id"]
@@ -890,7 +887,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 return
 
-    # Handle "delete all"
     if text.lower() in {"delete all", "del all"}:
         for _, handle in reminders.get(chat_id, {}).values():
             if isinstance(handle, asyncio.Task):
@@ -900,7 +896,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_reminder_list(context, chat_id)
         return
 
-    # Handle "delete <name>"
     if text.lower().startswith(("delete ", "del ")):
         target = text.split(maxsplit=1)[1]
         if target in reminders.get(chat_id, {}):
@@ -923,14 +918,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update_reminder_list(context, chat_id)
         return
 
-    # Handle "time"
     if "time" in text.lower():
         now = datetime.now(tz)
         m = await context.bot.send_message(chat_id, f"Current time: {now:%H:%M:%S}")
         asyncio.create_task(delete_later(m.message_id))
         return
 
-    # Handle natural language datetime
     delay_dt, msg_dt = parse_datetime_message(text, tz)
     if delay_dt == -1:
         m = await context.bot.send_message(chat_id, "⏰ This time has already passed.")
@@ -942,15 +935,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Handle relative time format like "10m do thing"
     delay_s, msg_rel = parse_time_prefix(text)
     if delay_s:
         asyncio.create_task(
             send_scheduled_message(context, chat_id, msg_rel, delay_s)
         )
         return
-
-    # Notes mode: treat message as a note
+    
     if notes_enabled(chat_id):
         await send_note(context, chat_id, update.message.text)
     else:
