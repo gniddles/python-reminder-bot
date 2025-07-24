@@ -1207,27 +1207,68 @@ async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def get_full_help_text():
     return (
-        "<b>🤖 Reminder Bot - Help Menu</b>\n\n"
-        "You can use the following formats to set reminders:\n"
-        "• <code>10m feed the cat</code>\n"
-        "• <code>1h30m water the plants</code>\n"
-        "• <code>today 14:00 meeting</code>\n"
-        "• <code>tomorrow 09:15 dentist</code>\n"
-        "• <code>22 June 19:30 birthday party</code>\n\n"
-        "🗑️ To delete reminders:\n"
-        "• <b>delete all</b> or <b>del all</b>\n"
-        "• <b>delete [name]</b> or <b>del [name]</b>\n"
-        "• <b>time</b> — show current time\n\n"
-        "Use the buttons below to collapse or delete this message."
+        "<b>🧠 Welcome to the Reminder Bot!</b>\n\n"
+        "This bot helps you manage your time, tasks, and routines efficiently through three main features:\n\n"
+        "📌 <b>1. Reminders (Timed)</b>\n"
+        "Send a message to set reminders like:\n"
+        "• <code>10m take a break</code>\n"
+        "• <code>1h30m attend meeting</code>\n"
+        "• <code>today 14:00 call John</code>\n"
+        "• <code>tomorrow 08:15 dentist appointment</code>\n"
+        "• <code>22 June 19:30 mom’s birthday</code>\n"
+        "⏰ You will get a notification with 'Complete' and 'Snooze' buttons.\n\n"
+
+        "📅 <b>2. Daily Reminders</b>\n"
+        "Send a message like:\n"
+        "• <code>daily 07:00 morning workout</code>\n"
+        "Daily reminders repeat at the same time every day.\n"
+        "They come with a ✅ Done button to track completion.\n\n"
+
+        "📝 <b>3. Notes</b>\n"
+        "Toggle note-taking mode with:\n"
+        "• <code>/notes</code>\n"
+        "Then just send any message — it will be stored as a note.\n"
+        "Notes are shown in the upcoming reminders list and can be marked complete.\n\n"
+
+        "📋 <b>Viewing Your Tasks</b>\n"
+        "Use the command:\n"
+        "• <code>/reminders</code>\n"
+        "To see your upcoming reminders, notes, and daily tasks.\n\n"
+
+        "⚙️ <b>Managing Reminders</b>\n"
+        "In the reminder list, tap:\n"
+        "• ✏️ Edit — to change text or time\n"
+        "• 🗑️ Delete Reminder — to remove tasks or notes\n\n"
+
+        "🌍 <b>Time‑zone Support</b>\n"
+        "To set or detect your time-zone:\n"
+        "• <code>/timezone Europe/Bratislava</code>\n"
+        "• <code>/dtz</code> – auto-detect by location (mobile only)\n\n"
+
+        "🧽 <b>Extra Features</b>\n"
+        "• <code>delete all</code> — remove everything\n"
+        "• <code>delete [task]</code> — remove one by name\n"
+        "• <code>time</code> — view current time\n\n"
+
+        "📎 <b>Pinning</b>\n"
+        "Use <code>/reminders</code> to pin or refresh the task list message in chat.\n\n"
+
+        "Use the buttons below to hide or remove this help message."
     )
 
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text(get_full_help_text(), parse_mode="HTML", reply_markup=get_help_keyboard("full"))
+    msg = await update.message.reply_text(
+        get_full_help_text(),
+        parse_mode="HTML",
+        reply_markup=get_help_keyboard("full")
+    )
     await asyncio.sleep(5)
     try:
         await context.bot.delete_message(chat_id=msg.chat.id, message_id=update.message.message_id)
     except:
         pass
+
 
 async def help_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
