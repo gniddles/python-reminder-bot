@@ -601,7 +601,7 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
 
     lines = []
     if daily_reminders:
-        lines.append("🗓️ <b>Daily Reminders:</b>")
+        lines.append("🗓️ \n<b>Daily Reminders:</b>")
         for daily_id, time_str, msg, last_done in daily_reminders:
             status = "✅ Done" if last_done == today_str else ""
             lines.append(f"• <b>{msg}</b> at <i>{time_str}</i> {status}")
@@ -620,7 +620,7 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
     if not lines:
         text = "📋 <b>No upcoming reminders.</b>"
     else:
-        text = "📋 <b>Upcoming Reminders:</b>\n\n" + "\n".join(lines)
+        text = "📋 <b>Upcoming Reminders:</b>\n" + "\n".join(lines)
 
     keyboard = get_removal_keyboard(chat_id)
     mid = reminder_list_message_ids.get(chat_id)
