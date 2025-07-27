@@ -615,7 +615,7 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
 
     lines = []
     if daily_reminders:
-        lines.append("🗓️ <b>Daily Reminders:</b>")
+        lines.append("\n🗓️ <b>Daily Reminders:</b>")
         for daily_id, time_str, msg, last_done in daily_reminders:
             status = "✅ Done" if last_done == today_str else ""
             lines.append(f"• <b>{msg}</b> at <i>{time_str}</i> {status}")
@@ -623,7 +623,7 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
     if user_reminders:
         lines.append("\n⏰ <b>Timed Reminders:</b>")
         for msg, (ts, _) in sorted(user_reminders.items(), key=lambda x: x[1][0]):
-            tstr = datetime.fromtimestamp(ts + 59, tz=tz).strftime("%d %b %H:%M")  # <-- fix 1 minute error
+            tstr = datetime.fromtimestamp(ts, tz=tz).strftime("%d %b %H:%M")
             lines.append(f"• <b>{msg}</b> at <i>{tstr}</i>")
 
     if user_notes:
@@ -634,7 +634,7 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
     if not lines:
         text = "📋 <b>No upcoming reminders.</b>"
     else:
-        text = "📋 <b>Upcoming Reminders:</b>\n\n" + "\n".join(lines)
+        text = "📋 <b>Upcoming Reminders:</b>\n" + "\n".join(lines)
 
     # 🧠 Fix: If we are in edit/remove mode but no content remains, clear mode
     if not (user_reminders or user_notes or daily_reminders):
@@ -1025,8 +1025,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             text,
                             fire_at - int(datetime.now(timezone.utc).timestamp())
                         )
-                removal_state[chat_id] = {"mode": "edit", "target": None}
-                await refresh_or_exit_edit_mode(context, chat_id)
+                removal_state.pop(chat_id, None)
+                await update_reminder_list(context, chat_id)
             return
 
         elif state["type"] == "note":
@@ -1048,16 +1048,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
                 DB.execute("UPDATE notes SET note=? WHERE id=? AND chat_id=?", (text, note_id, chat_id))
                 DB.commit()
-                removal_state[chat_id] = {"mode": "edit", "target": None}
-                await refresh_or_exit_edit_mode(context, chat_id)
+                removal_state.pop(chat_id, None)
+                await update_reminder_list(context, chat_id)
             return
 
         elif state["type"] == "daily":
             daily_id = state["daily_id"]
             DB.execute("UPDATE daily_reminders SET text=? WHERE id=? AND chat_id=?", (text, daily_id, chat_id))
             DB.commit()
-            removal_state[chat_id] = {"mode": "edit", "target": None}
-            await refresh_or_exit_edit_mode(context, chat_id)
+            removal_state.pop(chat_id, None)
+            await update_reminder_list(context, chat_id)
             return
 
     # Handle creation of daily reminders
@@ -1115,7 +1115,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
             del reminders[chat_id][target]
             db_delete_reminder(chat_id, target)
-            await refresh_or_exit_edit_mode(context, chat_id)
+            removal_state.pop(chat_id, None)
+            await update_reminder_list(context, chat_id)
             return
 
         row = DB.execute("SELECT id, message_id FROM notes WHERE note=? AND chat_id=?", (target, chat_id)).fetchone()
@@ -1126,13 +1127,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.delete_message(chat_id, message_id)
             except:
                 pass
-            await refresh_or_exit_edit_mode(context, chat_id)
+            removal_state.pop(chat_id, None)
+            await update_reminder_list(context, chat_id)
             return
 
         row = DB.execute("SELECT id FROM daily_reminders WHERE chat_id=? AND text=?", (chat_id, target)).fetchone()
         if row:
             delete_daily_reminder(chat_id, target)
-            await refresh_or_exit_edit_mode(context, chat_id)
+            removal_state.pop(chat_id, None)
+            await update_reminder_list(context, chat_id)
             return
 
     # Handle time query
