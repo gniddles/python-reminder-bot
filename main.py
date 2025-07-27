@@ -292,7 +292,10 @@ async def send_note(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str)
 
     await update_reminder_list(context, chat_id)
 
+last_checked_date = None
+
 async def daily_reminder_loop(app: Application):
+    global last_checked_date
     logging.info("🕒 Daily reminder loop started")
     
     while True:
@@ -306,29 +309,33 @@ async def daily_reminder_loop(app: Application):
             now_str = now_local.strftime("%H:%M")
             today_str = now_local.strftime("%Y-%m-%d")
 
-            for daily_id, time_str, text, last_done in fetch_daily_reminders(chat_id):
-                # Reset the done mark if from a previous day
-                if last_done and last_done != today_str:
-                    DB.execute(
-                        "UPDATE daily_reminders SET last_done_date=NULL WHERE id=? AND chat_id=?",
-                        (daily_id, chat_id)
-                    )
-                    DB.commit()
-                    last_done = None  # So it can be re-sent below
+            # 🔁 Clean up undone reminders at start of new day
+            if last_checked_date != today_str and now_str.startswith("00:"):
+                DB.execute("""
+                    DELETE FROM daily_reminders 
+                    WHERE chat_id = ? AND (last_done_date IS NULL OR last_done_date != ?)
+                """, (chat_id, (now_local - timedelta(days=1)).strftime("%Y-%m-%d")))
+                DB.commit()
+                await update_reminder_list(app, chat_id)
 
-                # Send reminder if it's time and not already done today
+            last_checked_date = today_str
+
+            # Reset and send new ones
+            for daily_id, time_str, text, last_done in fetch_daily_reminders(chat_id):
+                if last_done and last_done != today_str:
+                    DB.execute("UPDATE daily_reminders SET last_done_date=NULL WHERE id=? AND chat_id=?", (daily_id, chat_id))
+                    DB.commit()
+                    last_done = None
+
                 if time_str == now_str and last_done != today_str:
                     try:
                         keyboard = InlineKeyboardMarkup([
                             [InlineKeyboardButton("✅ Done", callback_data=f"daily_done|{daily_id}")]
                         ])
-                        await app.bot.send_message(
-                            chat_id=chat_id,
-                            text=f"📅 Daily Reminder: {text}",
-                            reply_markup=keyboard
-                        )
+                        await app.bot.send_message(chat_id=chat_id, text=f"📅 Daily Reminder: {text}", reply_markup=keyboard)
                     except Exception as e:
                         logging.warning(f"Failed to send daily reminder to {chat_id}: {e}")
+
 
 
 
@@ -609,7 +616,7 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
     if user_reminders:
         lines.append("\n⏰ <b>Timed Reminders:</b>")
         for msg, (ts, _) in sorted(user_reminders.items(), key=lambda x: x[1][0]):
-            tstr = datetime.fromtimestamp(ts, tz=tz).strftime("%d %b %H:%M")
+            tstr = datetime.fromtimestamp(ts + 59, tz=tz).strftime("%d %b %H:%M")
             lines.append(f"• <b>{msg}</b> at <i>{tstr}</i>")
 
     if user_notes:
@@ -980,10 +987,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif isinstance(handle, int):
                     try:
                         keyboard = InlineKeyboardMarkup([
-                            [
-                                InlineKeyboardButton("✅ Complete", callback_data=f"complete|{text}"),
-                                InlineKeyboardButton("🔁 Snooze 5m", callback_data=f"snooze|{text}|300"),
-                            ]
+                            [InlineKeyboardButton("✅ Complete", callback_data=f"complete|{text}"),
+                             InlineKeyboardButton("🔁 Snooze 5m", callback_data=f"snooze|{text}|300")]
                         ])
                         await context.bot.edit_message_text(
                             chat_id=chat_id,
@@ -1000,6 +1005,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             text,
                             fire_at - int(datetime.now(timezone.utc).timestamp())
                         )
+                # ✅ Return to edit/remove menu
+                removal_state[chat_id] = {"mode": "edit", "target": None}
                 await update_reminder_list(context, chat_id)
             return
 
@@ -1022,6 +1029,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
                 DB.execute("UPDATE notes SET note=? WHERE id=? AND chat_id=?", (text, note_id, chat_id))
                 DB.commit()
+                # ✅ Return to edit/remove menu
+                removal_state[chat_id] = {"mode": "edit", "target": None}
                 await update_reminder_list(context, chat_id)
             return
 
@@ -1029,6 +1038,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             daily_id = state["daily_id"]
             DB.execute("UPDATE daily_reminders SET text=? WHERE id=? AND chat_id=?", (text, daily_id, chat_id))
             DB.commit()
+            # ✅ Return to edit/remove menu
+            removal_state[chat_id] = {"mode": "edit", "target": None}
             await update_reminder_list(context, chat_id)
             return
 
@@ -1046,7 +1057,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Handle full deletion of all types
     if text.lower() in {"delete all", "del all"}:
-        # Delete reminder messages
         for message, (ts, handle_or_msgid) in reminders.get(chat_id, {}).items():
             if isinstance(handle_or_msgid, asyncio.Task):
                 handle_or_msgid.cancel()
@@ -1058,7 +1068,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reminders[chat_id] = {}
         db_delete_all_reminders(chat_id)
 
-        # Delete note messages
         for note_id, note_text, msg_id in DB.execute(
             "SELECT id, note, message_id FROM notes WHERE chat_id=?", (chat_id,)
         ).fetchall():
@@ -1068,7 +1077,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         delete_all_notes(chat_id)
 
-        # Delete daily reminders from DB (messages are not tracked directly)
         DB.execute("DELETE FROM daily_reminders WHERE chat_id=?", (chat_id,))
         DB.commit()
 
@@ -1102,7 +1110,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             await update_reminder_list(context, chat_id)
             return
-        
+
         row = DB.execute("SELECT id FROM daily_reminders WHERE chat_id=? AND text=?", (chat_id, target)).fetchone()
         if row:
             delete_daily_reminder(chat_id, target)
@@ -1142,6 +1150,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         m = await context.bot.send_message(chat_id, "I didn’t understand that. Try again.")
         asyncio.create_task(delete_later(m.message_id))
+
 
 
 async def on_startup(app: Application):
