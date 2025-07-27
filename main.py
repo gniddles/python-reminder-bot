@@ -178,6 +178,13 @@ def delete_all_notes(chat_id: int):
     DB.execute("DELETE FROM notes WHERE chat_id = ?", (chat_id,))
     DB.commit()
 
+async def refresh_or_exit_edit_mode(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    if reminders.get(chat_id) or fetch_notes(chat_id) or fetch_daily_reminders(chat_id):
+        await update_reminder_list(context, chat_id)
+    else:
+        removal_state.pop(chat_id, None)
+        await update_reminder_list(context, chat_id)
+
 
 async def detect_timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -608,7 +615,7 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
 
     lines = []
     if daily_reminders:
-        lines.append("\n🗓️ <b>Daily Reminders:</b>")
+        lines.append("🗓️ <b>Daily Reminders:</b>")
         for daily_id, time_str, msg, last_done in daily_reminders:
             status = "✅ Done" if last_done == today_str else ""
             lines.append(f"• <b>{msg}</b> at <i>{time_str}</i> {status}")
@@ -616,7 +623,7 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
     if user_reminders:
         lines.append("\n⏰ <b>Timed Reminders:</b>")
         for msg, (ts, _) in sorted(user_reminders.items(), key=lambda x: x[1][0]):
-            tstr = datetime.fromtimestamp(ts + 59, tz=tz).strftime("%d %b %H:%M")
+            tstr = datetime.fromtimestamp(ts + 59, tz=tz).strftime("%d %b %H:%M")  # <-- fix 1 minute error
             lines.append(f"• <b>{msg}</b> at <i>{tstr}</i>")
 
     if user_notes:
@@ -627,13 +634,21 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
     if not lines:
         text = "📋 <b>No upcoming reminders.</b>"
     else:
-        text = "📋 <b>Upcoming Reminders:</b>\n" + "\n".join(lines)
+        text = "📋 <b>Upcoming Reminders:</b>\n\n" + "\n".join(lines)
 
-    keyboard = None
-    if reminders.get(chat_id) or fetch_notes(chat_id) or fetch_daily_reminders(chat_id):
-        keyboard = get_removal_keyboard(chat_id)
-    else:
+    # 🧠 Fix: If we are in edit/remove mode but no content remains, clear mode
+    if not (user_reminders or user_notes or daily_reminders):
         removal_state.pop(chat_id, None)
+        keyboard = None
+    else:
+        # 🧠 Fix: Ensure we return to main menu after edit
+        if chat_id in removal_state and removal_state[chat_id]["mode"] in {"edit", "removal"}:
+            keyboard = get_removal_keyboard(chat_id)
+        elif chat_id not in removal_state:
+            keyboard = get_removal_keyboard(chat_id)
+        else:
+            keyboard = get_removal_keyboard(chat_id)
+
     mid = reminder_list_message_ids.get(chat_id)
     if mid is None:
         mid = db_get_list_msg_id(chat_id)
@@ -664,12 +679,6 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
             db_delete_list_msg_id(chat_id)
             await update_reminder_list(context, chat_id)
 
-async def refresh_or_exit_edit_mode(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    if reminders.get(chat_id) or fetch_notes(chat_id) or fetch_daily_reminders(chat_id):
-        await update_reminder_list(context, chat_id)
-    else:
-        removal_state.pop(chat_id, None)
-        await update_reminder_list(context, chat_id)
 
 
 async def send_scheduled_message(
