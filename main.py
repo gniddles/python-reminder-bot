@@ -59,7 +59,8 @@ CREATE TABLE IF NOT EXISTS daily_reminders (
     chat_id INTEGER NOT NULL,
     time TEXT NOT NULL, -- format "HH:MM"
     text TEXT NOT NULL,
-    last_done_date TEXT DEFAULT NULL
+    last_done_date TEXT DEFAULT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 )
 """)
 DB.commit()
@@ -318,12 +319,17 @@ async def daily_reminder_loop(app: Application):
 
             # 🔁 Clean up undone reminders at start of new day
             if last_checked_date != today_str and now_str.startswith("00:"):
+                yesterday_str = (now_local - timedelta(days=1)).strftime("%Y-%m-%d")
+
                 DB.execute("""
                     DELETE FROM daily_reminders 
-                    WHERE chat_id = ? AND (last_done_date IS NULL OR last_done_date != ?)
-                """, (chat_id, (now_local - timedelta(days=1)).strftime("%Y-%m-%d")))
+                    WHERE chat_id = ?
+                    AND (last_done_date IS NULL OR last_done_date != ?)
+                    AND DATE(created_at) < ?
+                """, (chat_id, yesterday_str, today_str))  # only delete if not done AND not created today
                 DB.commit()
                 await update_reminder_list(app, chat_id)
+
 
             last_checked_date = today_str
 
@@ -615,7 +621,7 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
 
     lines = []
     if daily_reminders:
-        lines.append("\n🗓️ <b>Daily Reminders:</b>")
+        lines.append("🗓️ <b>Daily Reminders:</b>")
         for daily_id, time_str, msg, last_done in daily_reminders:
             status = "✅ Done" if last_done == today_str else ""
             lines.append(f"• <b>{msg}</b> at <i>{time_str}</i> {status}")
@@ -632,9 +638,11 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
             lines.append(f"• <b>{note_txt}</b>")
 
     if not lines:
-        text = "📋 <b>No upcoming reminders.</b>"
+        text = "<b>REMINDER BOT</B>\n" + "\n📋 <b>No upcoming reminders.</b>"
     else:
-        text = "📋 <b>Upcoming Reminders:</b>\n" + "\n".join(lines)
+        text = "<b>REMINDER BOT</b>\n" + "\n".join(lines)
+
+
 
     # 🧠 Fix: If we are in edit/remove mode but no content remains, clear mode
     if not (user_reminders or user_notes or daily_reminders):
@@ -1167,10 +1175,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Notes
     if notes_enabled(chat_id):
-        await send_note(context, chat_id, update.message.text)
+        lines = [line.strip() for line in update.message.text.splitlines() if line.strip()]
+        for line in lines:
+            await send_note(context, chat_id, line)
     else:
         m = await context.bot.send_message(chat_id, "I didn’t understand that. Try again.")
         asyncio.create_task(delete_later(m.message_id))
+
 
 
 
