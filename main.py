@@ -59,7 +59,8 @@ CREATE TABLE IF NOT EXISTS daily_reminders (
     chat_id INTEGER NOT NULL,
     time TEXT NOT NULL, -- format "HH:MM"
     text TEXT NOT NULL,
-    last_done_date TEXT DEFAULT NULL
+    last_done_date TEXT DEFAULT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 )
 """)
 DB.commit()
@@ -318,12 +319,17 @@ async def daily_reminder_loop(app: Application):
 
             # 🔁 Clean up undone reminders at start of new day
             if last_checked_date != today_str and now_str.startswith("00:"):
+                yesterday_str = (now_local - timedelta(days=1)).strftime("%Y-%m-%d")
+
                 DB.execute("""
                     DELETE FROM daily_reminders 
-                    WHERE chat_id = ? AND (last_done_date IS NULL OR last_done_date != ?)
-                """, (chat_id, (now_local - timedelta(days=1)).strftime("%Y-%m-%d")))
+                    WHERE chat_id = ?
+                    AND (last_done_date IS NULL OR last_done_date != ?)
+                    AND DATE(created_at) < ?
+                """, (chat_id, yesterday_str, today_str))  # only delete if not done AND not created today
                 DB.commit()
                 await update_reminder_list(app, chat_id)
+
 
             last_checked_date = today_str
 
