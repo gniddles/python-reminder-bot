@@ -305,7 +305,7 @@ last_checked_date = None
 async def daily_reminder_loop(app: Application):
     global last_checked_date
     logging.info("🕒 Daily reminder loop started")
-    
+
     while True:
         await asyncio.sleep(60)
         now_utc = datetime.now(timezone.utc)
@@ -317,8 +317,8 @@ async def daily_reminder_loop(app: Application):
             now_str = now_local.strftime("%H:%M")
             today_str = now_local.strftime("%Y-%m-%d")
 
-            # 🔁 Clean up undone reminders at start of new day
-            if last_checked_date != today_str and now_str.startswith("00:"):
+            # ✅ Always perform cleanup once per day
+            if last_checked_date != today_str:
                 yesterday_str = (now_local - timedelta(days=1)).strftime("%Y-%m-%d")
 
                 DB.execute("""
@@ -326,14 +326,13 @@ async def daily_reminder_loop(app: Application):
                     WHERE chat_id = ?
                     AND (last_done_date IS NULL OR last_done_date != ?)
                     AND DATE(created_at) < ?
-                """, (chat_id, yesterday_str, today_str))  # only delete if not done AND not created today
+                """, (chat_id, yesterday_str, today_str))
+
                 DB.commit()
+                last_checked_date = today_str
                 await update_reminder_list(app, chat_id)
 
-
-            last_checked_date = today_str
-
-            # Reset and send new ones
+            # Reset or trigger today's reminders
             for daily_id, time_str, text, last_done in fetch_daily_reminders(chat_id):
                 if last_done and last_done != today_str:
                     DB.execute("UPDATE daily_reminders SET last_done_date=NULL WHERE id=? AND chat_id=?", (daily_id, chat_id))
@@ -348,6 +347,7 @@ async def daily_reminder_loop(app: Application):
                         await app.bot.send_message(chat_id=chat_id, text=f"📅 Daily Reminder: {text}", reply_markup=keyboard)
                     except Exception as e:
                         logging.warning(f"Failed to send daily reminder to {chat_id}: {e}")
+
 
 
 
@@ -697,34 +697,36 @@ async def send_scheduled_message(
     *,
     store_in_db: bool = True
 ):
-    fire_at = int(datetime.now(timezone.utc).timestamp()
-                  + delay_seconds)
+    fire_at = int(datetime.now(timezone.utc).timestamp() + delay_seconds)
 
     if store_in_db:
         db_add_reminder(chat_id, message, fire_at)
 
     async def task_body():
-        await asyncio.sleep(delay_seconds)
+        try:
+            await asyncio.sleep(delay_seconds)
 
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Complete", callback_data=f"complete|{message}"),
-            InlineKeyboardButton("🔁 Snooze 5m", callback_data=f"snooze|{message}|300"),
-        ]])
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Complete", callback_data=f"complete|{message}"),
+                 InlineKeyboardButton("🔁 Snooze 5m", callback_data=f"snooze|{message}|300")]
+            ])
 
-        sent = await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"⏰ Reminder: {message}",
-            reply_markup=keyboard,
-        )
+            sent = await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⏰ Reminder: {message}",
+                reply_markup=keyboard,
+            )
 
-        
-        reminders[chat_id][message] = (fire_at, sent.message_id)
-        db_delete_reminder(chat_id, message)
-        await update_reminder_list(context, chat_id)
+            reminders.setdefault(chat_id, {})[message] = (fire_at, sent.message_id)
+            db_delete_reminder(chat_id, message)
+            await update_reminder_list(context, chat_id)
+        except Exception as e:
+            logging.error(f"❌ Failed to send scheduled reminder: {e}", exc_info=True)
 
     task = asyncio.create_task(task_body())
     reminders.setdefault(chat_id, {})[message] = (fire_at, task)
     await update_reminder_list(context, chat_id)
+
 
     
     
@@ -1191,29 +1193,37 @@ async def on_startup(app: Application):
     asyncio.create_task(daily_reminder_loop(app))  # ← Add this line
 
 
+from types import SimpleNamespace
+
 async def restore_tasks_on_startup(app: Application):
     """
-    1.  Load saved list‑message IDs so we can edit (not duplicate) them.
-    2.  Recreate asyncio tasks for every future reminder row.
-    3.  Refresh the list once per chat.
+    Restore future reminders from DB and re-schedule them as asyncio tasks.
+    Also refresh reminder list messages.
     """
-    ctx = ContextTypes.DEFAULT_TYPE(application=app)
-
+    # Load list message IDs into memory
     for chat_id, mid in DB.execute("SELECT chat_id, list_msg_id FROM reminder_meta"):
         reminder_list_message_ids[chat_id] = mid
 
-    chats_touched: set[int] = set()
     now_ts = int(datetime.now(timezone.utc).timestamp())
+    chats_touched: set[int] = set()
 
     for chat_id, text, fire_at in db_fetch_future():
         delay = fire_at - now_ts
         if delay <= 0:
             continue
-        await send_scheduled_message(ctx, chat_id, text, delay, store_in_db=False)
+
+        # Fake context object with bot reference
+        context = SimpleNamespace()
+        context.bot = app.bot
+        context.application = app
+
+        await send_scheduled_message(context, chat_id, text, delay, store_in_db=False)
         chats_touched.add(chat_id)
-        
+
+    # Update reminder list for each chat
     for chat_id in chats_touched:
-        await update_reminder_list(ctx, chat_id)
+        await update_reminder_list(context, chat_id)
+
 
 def get_help_keyboard(state="full"):
     if state == "full":
