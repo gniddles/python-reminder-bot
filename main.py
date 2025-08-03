@@ -28,7 +28,33 @@ editing_state = {}
 
 DEFAULT_TZ = ZoneInfo("Europe/Kyiv")
 
-DB = sqlite3.connect("reminder_bot_copy.db")
+DB = sqlite3.connect("reminder_bot.db")
+# Patch to ensure 'created_at' column exists (compatible with SQLite)
+def ensure_created_at_column():
+    try:
+        DB.execute("SELECT created_at FROM daily_reminders LIMIT 1")
+    except sqlite3.OperationalError:
+        # We must recreate the table to add the column with default CURRENT_TIMESTAMP
+        DB.execute("ALTER TABLE daily_reminders RENAME TO daily_reminders_old")
+        DB.execute("""
+            CREATE TABLE daily_reminders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                time TEXT NOT NULL,
+                text TEXT NOT NULL,
+                last_done_date TEXT DEFAULT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        DB.execute("""
+            INSERT INTO daily_reminders (id, chat_id, time, text, last_done_date, created_at)
+            SELECT id, chat_id, time, text, last_done_date, datetime('now') FROM daily_reminders_old
+        """)
+        DB.execute("DROP TABLE daily_reminders_old")
+        DB.commit()
+
+ensure_created_at_column()
+
 DB.execute("""
     CREATE TABLE IF NOT EXISTS users (
         chat_id INTEGER PRIMARY KEY,
