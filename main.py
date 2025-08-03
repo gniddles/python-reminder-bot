@@ -17,7 +17,7 @@ from timezonefinder import TimezoneFinder
 from zoneinfo import ZoneInfo, available_timezones
 
 logging.basicConfig(level=logging.INFO)
-TOKEN = "8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE"
+TOKEN = "1014634066:AAGTFzlrmJQ7KSM4Bh98o2050IqiL508w5g"
 
 datetime.now(timezone.utc)
 detect_prompt_ids = {}
@@ -28,7 +28,7 @@ editing_state = {}
 
 DEFAULT_TZ = ZoneInfo("Europe/Kyiv")
 
-DB = sqlite3.connect("reminder_bot.db")
+DB = sqlite3.connect("reminder_bot_copy.db")
 # Patch to ensure 'created_at' column exists (compatible with SQLite)
 def ensure_created_at_column():
     try:
@@ -344,19 +344,19 @@ async def daily_reminder_loop(app: Application):
             today_str = now_local.strftime("%Y-%m-%d")
 
             # ✅ Always perform cleanup once per day
+            # ✅ Only reset last_done_date if needed, don't delete anything
             if last_checked_date != today_str:
-                yesterday_str = (now_local - timedelta(days=1)).strftime("%Y-%m-%d")
-
-                DB.execute("""
-                    DELETE FROM daily_reminders 
-                    WHERE chat_id = ?
-                    AND (last_done_date IS NULL OR last_done_date != ?)
-                    AND DATE(created_at) < ?
-                """, (chat_id, yesterday_str, today_str))
-
-                DB.commit()
                 last_checked_date = today_str
+
+                for daily_id, _, _, last_done in fetch_daily_reminders(chat_id):
+                    if last_done and last_done != today_str:
+                        DB.execute(
+                            "UPDATE daily_reminders SET last_done_date=NULL WHERE id=? AND chat_id=?",
+                            (daily_id, chat_id)
+                        )
+                DB.commit()
                 await update_reminder_list(app, chat_id)
+
 
             # Reset or trigger today's reminders
             for daily_id, time_str, text, last_done in fetch_daily_reminders(chat_id):
