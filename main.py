@@ -28,7 +28,7 @@ editing_state = {}
 
 DEFAULT_TZ = ZoneInfo("Europe/Kyiv")
 
-DB = sqlite3.connect("reminder_bot.db")
+DB = sqlite3.connect("reminder_bot_copy.db")
 DB.execute("""
     CREATE TABLE IF NOT EXISTS users (
         chat_id INTEGER PRIMARY KEY,
@@ -339,7 +339,8 @@ async def daily_reminder_loop(app: Application):
                     DB.commit()
                     last_done = None
 
-                if time_str == now_str and last_done != today_str:
+                target_hour, target_minute = map(int, time_str.split(":"))
+                if (now_local.hour == target_hour and now_local.minute == target_minute) and last_done != today_str:
                     try:
                         keyboard = InlineKeyboardMarkup([
                             [InlineKeyboardButton("✅ Done", callback_data=f"daily_done|{daily_id}")]
@@ -347,6 +348,7 @@ async def daily_reminder_loop(app: Application):
                         await app.bot.send_message(chat_id=chat_id, text=f"📅 Daily Reminder: {text}", reply_markup=keyboard)
                     except Exception as e:
                         logging.warning(f"Failed to send daily reminder to {chat_id}: {e}")
+
 
 
 
@@ -1373,4 +1375,4 @@ app.add_handler(MessageHandler(filters.COMMAND, unknown_command_handler))
 
 
 print("Bot is running...")
-app.run_polling()
+app.run_polling()  
