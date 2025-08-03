@@ -17,7 +17,7 @@ from timezonefinder import TimezoneFinder
 from zoneinfo import ZoneInfo, available_timezones
 
 logging.basicConfig(level=logging.INFO)
-TOKEN = "1014634066:AAGTFzlrmJQ7KSM4Bh98o2050IqiL508w5g"
+TOKEN = "8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE"
 
 datetime.now(timezone.utc)
 detect_prompt_ids = {}
@@ -28,7 +28,7 @@ editing_state = {}
 
 DEFAULT_TZ = ZoneInfo("Europe/Kyiv")
 
-DB = sqlite3.connect("reminder_bot_copy.db")
+DB = sqlite3.connect("reminder_bot.db")
 # Patch to ensure 'created_at' column exists (compatible with SQLite)
 def ensure_created_at_column():
     try:
