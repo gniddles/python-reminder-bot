@@ -1469,14 +1469,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     m = re.match(r"^\s*(in\s+\d+\s*[smhd]|at\s+\d{1,2}:\d{2}|tomorrow\s+\d{1,2}:\d{2})\s+(.+)", text, re.IGNORECASE)
     if m:
         when, message = m.groups()
-        fire_at_ts = parse_time_to_timestamp(when, tz)
+        fire_at_ts = parse_time_to_timestamp(when, tz) # type: ignore
         if fire_at_ts is None:
             m = await context.bot.send_message(chat_id, "⚠️ I couldn’t parse the time. Try: 10m task, in 10m task, at 18:45, tomorrow 09:00")
             asyncio.create_task(delete_later(m.message_id, delay=3))
             return
-        task = asyncio.create_task(task_body(context, chat_id, message, fire_at_ts))
+        task = asyncio.create_task(task_body(context, chat_id, message, fire_at_ts)) # type: ignore
         reminders.setdefault(chat_id, {})[message] = (fire_at_ts, task)
-        db_store_reminder(chat_id, message, fire_at_ts)
+        db_store_reminder(chat_id, message, fire_at_ts) # type: ignore
         await update_reminder_list(context, chat_id)
         return
 
