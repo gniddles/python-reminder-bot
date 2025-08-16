@@ -71,6 +71,13 @@ CREATE TABLE IF NOT EXISTS user_notes_mode (
     enabled INTEGER NOT NULL DEFAULT 0
 )""")
 DB.execute("""
+CREATE TABLE IF NOT EXISTS user_daily_display (
+    chat_id INTEGER PRIMARY KEY,
+    hide_inactive INTEGER NOT NULL DEFAULT 0
+)
+""")
+DB.commit()
+DB.execute("""
 CREATE TABLE IF NOT EXISTS notes (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id    INTEGER NOT NULL,
@@ -108,6 +115,52 @@ except sqlite3.OperationalError:
     DB.commit()
 
 tf = TimezoneFinder()
+
+def get_daily_display_mode(chat_id: int) -> bool:
+    row = DB.execute("SELECT hide_inactive FROM user_daily_display WHERE chat_id=?", (chat_id,)).fetchone()
+    return bool(row[0]) if row else False
+
+def set_daily_display_mode(chat_id: int, hide: bool):
+    DB.execute("INSERT OR REPLACE INTO user_daily_display(chat_id, hide_inactive) VALUES (?,?)", (chat_id, int(hide)))
+    DB.commit()
+
+async def daily_display_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    cmd_mid = update.message.message_id
+
+    # delete user command after 1s
+    async def delete_cmd():
+        await asyncio.sleep(1)
+        try:
+            await context.bot.delete_message(chat_id, cmd_mid)
+        except:
+            pass
+    asyncio.create_task(delete_cmd())
+
+    if not context.args:
+        reply = await update.message.reply_text("Usage: /daily show OR /daily hide")
+        return
+
+    subcmd = context.args[0].lower()
+    if subcmd == "hide":
+        set_daily_display_mode(chat_id, True)
+        reply = await update.message.reply_text("🔒 Inactive daily reminders will be hidden.")
+    elif subcmd == "show":
+        set_daily_display_mode(chat_id, False)
+        reply = await update.message.reply_text("📖 All daily reminders will be shown.")
+    else:
+        reply = await update.message.reply_text("Usage: /daily show OR /daily hide")
+
+    # delete bot reply after 3s
+    async def delete_reply():
+        await asyncio.sleep(3)
+        try:
+            await context.bot.delete_message(chat_id, reply.message_id)
+        except:
+            pass
+    asyncio.create_task(delete_reply())
+
+    await update_reminder_list(context, chat_id)
 
 async def send_days_keyboard(bot, chat_id, daily_id, selected_days):
     """Send a keyboard allowing the user to toggle days for a daily reminder."""
@@ -720,19 +773,23 @@ def get_removal_keyboard(chat_id=None):
             buttons = []
 
             for daily_id, _, msg, _ in user_dailies:
-                label = f"🗑️ {msg}" if state["mode"] == "removal" else f"✏️ {msg}"
+                icon = "🗓️"
+                label = f"{icon} {msg}" if state["mode"] == "removal" else f"{icon} {msg}"
                 cb = f"remove_daily|{daily_id}" if state["mode"] == "removal" else f"edit_daily|{daily_id}"
                 buttons.append([InlineKeyboardButton(label, callback_data=cb)])
-            
+
             for msg in user_reminders.keys():
-                label = f"🗑️ {msg}" if state["mode"] == "removal" else f"✏️ {msg}"
+                icon = "⏰"
+                label = f"{icon} {msg}" if state["mode"] == "removal" else f"{icon} {msg}"
                 cb = f"remove_reminder|{msg}" if state["mode"] == "removal" else f"edit_reminder|{msg}"
                 buttons.append([InlineKeyboardButton(label, callback_data=cb)])
 
             for note_id, note in user_notes:
-                label = f"🗑️ {note}" if state["mode"] == "removal" else f"✏️ {note}"
+                icon = "📝"
+                label = f"{icon} {note}" if state["mode"] == "removal" else f"{icon} {note}"
                 cb = f"remove_note|{note_id}" if state["mode"] == "removal" else f"edit_note|{note_id}"
                 buttons.append([InlineKeyboardButton(label, callback_data=cb)])
+
 
             buttons.append([
                 InlineKeyboardButton("✅ Done", callback_data="cancel_removal")
@@ -767,10 +824,17 @@ async def update_reminder_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
     today_str = datetime.now(tz).strftime('%Y-%m-%d')
 
     lines = []
+    hide_inactive = get_daily_display_mode(chat_id)
+    weekday_today = datetime.now(tz).weekday()
+
     if daily_reminders:
         lines.append("🗓️ <b>Daily Reminders:</b>")
         for daily_id, time_str, msg, last_done in daily_reminders:
-            # ensure stored daily HH:MM shows as user's local HH:MM
+            row_days = DB.execute("SELECT days FROM daily_reminders WHERE id=? AND chat_id=?", (daily_id, chat_id)).fetchone()
+            allowed_days = set(int(x) for x in row_days[0].split(",")) if row_days and row_days[0] else set(range(7))
+
+            if hide_inactive and weekday_today not in allowed_days:
+                continue  # skip showing this reminder
             try:
                 h, m = map(int, time_str.split(":"))
                 local_dt = datetime.now(tz).replace(hour=h, minute=m, second=0, microsecond=0)
@@ -978,7 +1042,6 @@ async def handle_removal_button(update: Update, context: ContextTypes.DEFAULT_TY
     - Shows "Edit text | Edit days" under the main reminders message.
     - Day selector toggles days in-place.
     - After saving/cancelling, returns to the main reminders list (clears edit mode).
-    - Confirmation messages auto-delete after 3s.
     """
     query = update.callback_query
     await query.answer()
@@ -1048,7 +1111,6 @@ async def handle_removal_button(update: Update, context: ContextTypes.DEFAULT_TY
         mid = _get_list_msg_id()
         if mid:
             try:
-                # Edit the main list message reply_markup so buttons appear under it
                 await context.bot.edit_message_reply_markup(chat_id=chat_id, message_id=mid, reply_markup=keyboard)
             except Exception:
                 await context.bot.send_message(chat_id, "What would you like to edit?", reply_markup=keyboard)
@@ -1068,7 +1130,7 @@ async def handle_removal_button(update: Update, context: ContextTypes.DEFAULT_TY
         editing_state[chat_id]["prompt_msg_id"] = msg.message_id
         return
 
-    # ---------- edit days flow: show toggleable keyboard under main message ----------
+    # ---------- edit days flow ----------
     if query.data.startswith("edit_daily_days|"):
         _, daily_id = query.data.split("|", 1)
         daily_id = int(daily_id)
@@ -1093,7 +1155,7 @@ async def handle_removal_button(update: Update, context: ContextTypes.DEFAULT_TY
             await context.bot.send_message(chat_id, "Select days for this reminder:", reply_markup=days_markup)
         return
 
-    # ---------- toggle a day (update in-memory editing_state and refresh reply_markup) ----------
+    # ---------- toggle days ----------
     if query.data.startswith("toggle_day|"):
         _, daily_id_s, day_idx_s = query.data.split("|", 2)
         daily_id = int(daily_id_s); day_idx = int(day_idx_s)
@@ -1103,7 +1165,6 @@ async def handle_removal_button(update: Update, context: ContextTypes.DEFAULT_TY
                 state["days"].remove(day_idx)
             else:
                 state["days"].add(day_idx)
-            # Rebuild and edit main message markup
             days_markup = _build_days_markup(daily_id, state["days"])
             mid = _get_list_msg_id()
             if mid:
@@ -1113,7 +1174,7 @@ async def handle_removal_button(update: Update, context: ContextTypes.DEFAULT_TY
                     pass
         return
 
-    # ---------- save days: persist and return to main menu ----------
+    # ---------- save days ----------
     if query.data.startswith("save_days|"):
         _, daily_id_s = query.data.split("|", 1)
         daily_id = int(daily_id_s)
@@ -1122,67 +1183,31 @@ async def handle_removal_button(update: Update, context: ContextTypes.DEFAULT_TY
             days_str = ",".join(map(str, sorted(state["days"])))
             DB.execute("UPDATE daily_reminders SET days=? WHERE id=? AND chat_id=?", (days_str, daily_id, chat_id))
             DB.commit()
-            # exit edit mode so update_reminder_list shows normal keyboard
             removal_state.pop(chat_id, None)
             await update_reminder_list(context, chat_id)
-            try:
-                m = await context.bot.send_message(chat_id, "✅ Days updated.")
-                async def _del():
-                    await asyncio.sleep(3)
-                    try:
-                        await context.bot.delete_message(chat_id, m.message_id)
-                    except:
-                        pass
-                asyncio.create_task(_del())
-            except Exception:
-                pass
         else:
-            # Nothing to save; just restore the main view
             removal_state.pop(chat_id, None)
             await update_reminder_list(context, chat_id)
         return
 
-    # ---------- edit other items (timed reminder / note) ----------
-    if query.data.startswith("edit_reminder|"):
-        _, original_text = query.data.split("|", 1)
-        editing_state[chat_id] = {"type": "reminder", "original": original_text}
-        msg = await context.bot.send_message(
-            chat_id,
-            "✏️ Send me the edited version of your reminder.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel_edit")]])
-        )
-        editing_state[chat_id]["prompt_msg_id"] = msg.message_id
-        return
 
-    if query.data.startswith("edit_note|"):
-        _, note_id = query.data.split("|", 1)
-        note_id = int(note_id)
-        editing_state[chat_id] = {"type": "note", "note_id": note_id}
-        msg = await context.bot.send_message(
-            chat_id,
-            "✏️ Send me the edited version of your note.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel_edit")]])
-        )
-        editing_state[chat_id]["prompt_msg_id"] = msg.message_id
-        return
-
-    # ---------- cancel edit: clear editing and edit-mode state, restore main list ----------
+    # ---------- cancel edit ----------
     if query.data == "cancel_edit":
-        editing_state.pop(chat_id, None)
+        # remove any editing state
+        state = editing_state.pop(chat_id, None)
+        if state:
+            # if there was a prompt message, delete it too
+            prompt_id = state.get("prompt_msg_id")
+            if prompt_id:
+                try:
+                    await context.bot.delete_message(chat_id, prompt_id)
+                except Exception:
+                    pass
+
         removal_state.pop(chat_id, None)
         await update_reminder_list(context, chat_id)
-        try:
-            m = await context.bot.send_message(chat_id, "❌ Edit cancelled.")
-            async def _del():
-                await asyncio.sleep(3)
-                try:
-                    await context.bot.delete_message(chat_id, m.message_id)
-                except:
-                    pass
-            asyncio.create_task(_del())
-        except Exception:
-            pass
         return
+
 
     # ---------- confirm delete ----------
     if query.data.startswith("confirm_delete|"):
@@ -1212,19 +1237,18 @@ async def handle_removal_button(update: Update, context: ContextTypes.DEFAULT_TY
         await update_reminder_list(context, chat_id)
         return
 
-    # ---------- cancel confirm / cancel removal ----------
+    # ---------- cancel confirm ----------
     if query.data == "cancel_confirm":
         if chat_id in removal_state and removal_state[chat_id]["mode"] == "confirm":
             removal_state[chat_id] = {"mode": "removal", "target": None}
             await update_reminder_list(context, chat_id)
         return
 
+    # ---------- cancel removal ----------
     if query.data == "cancel_removal":
         removal_state.pop(chat_id, None)
         await update_reminder_list(context, chat_id)
         return
-
-
 
 def parse_time_prefix(text: str):
     match = re.match(r'(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?\s+(.*)', text.strip())
@@ -1303,18 +1327,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg_id = update.message.message_id
     text = update.message.text.strip()
 
-    async def delete_later(mid, delay=5):
+    # delete user message after 1 second
+    async def delete_later(mid, delay=1):
         await asyncio.sleep(delay)
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=mid)
         except:
             pass
-
     asyncio.create_task(delete_later(msg_id))
 
-    # Handle editing state first
-    if chat_id in editing_state:
-        state = editing_state.pop(chat_id)
+    # --- Handle editing state first ---
+    state = editing_state.get(chat_id)
+    if state:
         prompt_id = state.get("prompt_msg_id")
         if prompt_id:
             try:
@@ -1324,94 +1348,94 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if state["type"] == "reminder":
             original = state["original"]
-            if original in reminders.get(chat_id, {}):
-                fire_at, handle = reminders[chat_id].pop(original)
+            if chat_id in reminders and original in reminders[chat_id]:
+                fire_at, handle = reminders[chat_id][original]
                 if isinstance(handle, asyncio.Task):
-                    handle.cancel()
-                    db_delete_reminder(chat_id, original)
+                    try:
+                        handle.cancel()
+                    except:
+                        pass
+                try:
                     await send_scheduled_message(
                         context,
                         chat_id,
                         text,
                         fire_at - int(datetime.now(timezone.utc).timestamp())
                     )
-                elif isinstance(handle, int):
-                    try:
-                        keyboard = InlineKeyboardMarkup([
-                            [InlineKeyboardButton("✅ Complete", callback_data=f"complete|{text}"),
-                             InlineKeyboardButton("🔁 Snooze 5m", callback_data=f"snooze|{text}|300")]
-                        ])
-                        await context.bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=handle,
-                            text=f"⏰ Reminder: {text}",
-                            reply_markup=keyboard
-                        )
-                        reminders[chat_id][text] = (fire_at, handle)
-                        db_delete_reminder(chat_id, original)
-                    except:
-                        await send_scheduled_message(
-                            context,
-                            chat_id,
-                            text,
-                            fire_at - int(datetime.now(timezone.utc).timestamp())
-                        )
-                removal_state.pop(chat_id, None)
-                await update_reminder_list(context, chat_id)
-            return
-
-        elif state["type"] == "note":
-            note_id = state["note_id"]
-            row = DB.execute("SELECT message_id FROM notes WHERE id=? AND chat_id=?", (note_id, chat_id)).fetchone()
-            if row:
-                msg_id_old = row[0]
-                try:
-                    kb = InlineKeyboardMarkup([
-                        [InlineKeyboardButton("✅ Complete", callback_data=f"complete_note|{note_id}")]
-                    ])
-                    await context.bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=msg_id_old,
-                        text=text,
-                        reply_markup=kb
-                    )
+                    reminders[chat_id][text] = (fire_at, handle)
+                    db_delete_reminder(chat_id, original)
                 except:
-                    pass
-                DB.execute("UPDATE notes SET note=? WHERE id=? AND chat_id=?", (text, note_id, chat_id))
-                DB.commit()
+                    await send_scheduled_message(
+                        context,
+                        chat_id,
+                        text,
+                        fire_at - int(datetime.now(timezone.utc).timestamp())
+                    )
                 removal_state.pop(chat_id, None)
                 await update_reminder_list(context, chat_id)
             return
 
         elif state["type"] == "daily":
-            # user sent new text for a daily reminder (editing text flow)
             daily_id = state["daily_id"]
             DB.execute("UPDATE daily_reminders SET text=? WHERE id=? AND chat_id=?", (text, daily_id, chat_id))
             DB.commit()
-
-            # exit edit mode (same behavior as saving days)
+            try:
+                row = DB.execute(
+                    "SELECT message_id FROM daily_reminder_messages WHERE daily_id=? AND chat_id=?",
+                    (daily_id, chat_id)
+                ).fetchone()
+                if row:
+                    live_mid = row[0]
+                    keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("✅ Done", callback_data=f"daily_done|{daily_id}")]
+                    ])
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=live_mid,
+                            text=f"📅 Daily Reminder: {text}",
+                            reply_markup=keyboard
+                        )
+                    except telegram.error.BadRequest as e:
+                        if "message to edit not found" in str(e).lower():
+                            DB.execute(
+                                "DELETE FROM daily_reminder_messages WHERE daily_id=? AND chat_id=?",
+                                (daily_id, chat_id)
+                            )
+                            DB.commit()
+                        else:
+                            logging.warning(f"Could not update live daily reminder message: {e}")
+            except Exception as e:
+                logging.debug(f"Skipping live daily message update: {e}")
             removal_state.pop(chat_id, None)
-
-            # refresh the main reminder list so it shows the normal keyboard
             await update_reminder_list(context, chat_id)
-
-            # send a short confirmation that self-deletes after 3 seconds
             try:
                 m = await context.bot.send_message(chat_id, "✅ Text updated.")
-                async def _del():
-                    await asyncio.sleep(3)
-                    try:
-                        await context.bot.delete_message(chat_id, m.message_id)
-                    except:
-                        pass
-                asyncio.create_task(_del())
+                asyncio.create_task(delete_later(m.message_id, delay=3))
             except Exception:
                 pass
-
             return
 
+        elif state["type"] == "note":
+            note_id = state["note_id"]
+            DB.execute("UPDATE notes SET text=? WHERE id=? AND chat_id=?", (text, note_id, chat_id))
+            DB.commit()
+            removal_state.pop(chat_id, None)
+            await update_reminder_list(context, chat_id)
+            try:
+                m = await context.bot.send_message(chat_id, "✅ Note updated.")
+                asyncio.create_task(delete_later(m.message_id, delay=3))
+            except Exception:
+                pass
+            return
 
-    # Handle creation of daily reminders
+    # --- Compact reminders like "10m coffee", "1h30m gym" ---
+    seconds, message = parse_time_prefix(text)
+    if seconds and message:
+        await send_scheduled_message(context, chat_id, message, seconds)
+        return
+
+    # --- Create daily reminder: "daily 07:00 workout" ---
     m = re.match(r'^daily\s+(\d{1,2}):(\d{2})\s+(.+)', text, re.IGNORECASE)
     if m:
         hour, minute, message = m.groups()
@@ -1423,110 +1447,47 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_reminder_list(context, chat_id)
         return
 
-    # Handle full deletion of all types
+    # --- Full delete all ---
     if text.lower() in {"delete all", "del all"}:
-        for message, (ts, handle_or_msgid) in reminders.get(chat_id, {}).items():
-            if isinstance(handle_or_msgid, asyncio.Task):
-                handle_or_msgid.cancel()
-            elif isinstance(handle_or_msgid, int):
+        for message, (ts, handle) in list(reminders.get(chat_id, {}).items()):
+            if isinstance(handle, asyncio.Task):
                 try:
-                    await context.bot.delete_message(chat_id, handle_or_msgid)
+                    handle.cancel()
                 except:
                     pass
-        reminders[chat_id] = {}
-        db_delete_all_reminders(chat_id)
-
-        for note_id, note_text, msg_id in DB.execute(
-            "SELECT id, note, message_id FROM notes WHERE chat_id=?", (chat_id,)
-        ).fetchall():
-            try:
-                await context.bot.delete_message(chat_id, msg_id)
-            except:
-                pass
-        delete_all_notes(chat_id)
-
+            db_delete_reminder(chat_id, message)
+        reminders.pop(chat_id, None)
+        DB.execute("DELETE FROM notes WHERE chat_id=?", (chat_id,))
         DB.execute("DELETE FROM daily_reminders WHERE chat_id=?", (chat_id,))
         DB.commit()
+        await update_reminder_list(context, chat_id)
+        m = await context.bot.send_message(chat_id, "🗑️ Deleted everything.")
+        asyncio.create_task(delete_later(m.message_id, delay=3))
+        return
 
-        removal_state.pop(chat_id, None)
+    # --- Explicit timed reminders: "in 10m tea", "at 18:45 dinner", "tomorrow 09:00 call" ---
+    m = re.match(r"^\s*(in\s+\d+\s*[smhd]|at\s+\d{1,2}:\d{2}|tomorrow\s+\d{1,2}:\d{2})\s+(.+)", text, re.IGNORECASE)
+    if m:
+        when, message = m.groups()
+        fire_at_ts = parse_time_to_timestamp(when, tz)
+        if fire_at_ts is None:
+            m = await context.bot.send_message(chat_id, "⚠️ I couldn’t parse the time. Try: 10m task, in 10m task, at 18:45, tomorrow 09:00")
+            asyncio.create_task(delete_later(m.message_id, delay=3))
+            return
+        task = asyncio.create_task(task_body(context, chat_id, message, fire_at_ts))
+        reminders.setdefault(chat_id, {})[message] = (fire_at_ts, task)
+        db_store_reminder(chat_id, message, fire_at_ts)
         await update_reminder_list(context, chat_id)
         return
 
-    # Handle single deletions
-    if text.lower().startswith(("delete ", "del ")):
-        target = text.split(maxsplit=1)[1]
-        if target in reminders.get(chat_id, {}):
-            _, handle = reminders[chat_id][target]
-            if isinstance(handle, asyncio.Task):
-                handle.cancel()
-            elif isinstance(handle, int):
-                try:
-                    await context.bot.delete_message(chat_id, handle)
-                except:
-                    pass
-            del reminders[chat_id][target]
-            db_delete_reminder(chat_id, target)
-            removal_state.pop(chat_id, None)
-            await update_reminder_list(context, chat_id)
-            return
-
-        row = DB.execute("SELECT id, message_id FROM notes WHERE note=? AND chat_id=?", (target, chat_id)).fetchone()
-        if row:
-            note_id, message_id = row
-            delete_note(chat_id, note_id)
-            try:
-                await context.bot.delete_message(chat_id, message_id)
-            except:
-                pass
-            removal_state.pop(chat_id, None)
-            await update_reminder_list(context, chat_id)
-            return
-
-        row = DB.execute("SELECT id FROM daily_reminders WHERE chat_id=? AND text=?", (chat_id, target)).fetchone()
-        if row:
-            delete_daily_reminder(chat_id, target)
-            removal_state.pop(chat_id, None)
-            await update_reminder_list(context, chat_id)
-            return
-
-    # Handle time query
-    if "time" in text.lower():
-        now = datetime.now(tz)
-        m = await context.bot.send_message(chat_id, f"Current time: {now:%H:%M:%S}")
-        asyncio.create_task(delete_later(m.message_id))
-        return
-
-    # Handle natural language datetime reminder
-    delay_dt, msg_dt = parse_datetime_message(text, tz)
-    if delay_dt == -1:
-        m = await context.bot.send_message(chat_id, "⏰ This time has already passed.")
-        asyncio.create_task(delete_later(m.message_id))
-        return
-    if delay_dt is not None:
-        asyncio.create_task(
-            send_scheduled_message(context, chat_id, msg_dt, int(delay_dt))
-        )
-        return
-
-    # Handle relative time reminder
-    delay_s, msg_rel = parse_time_prefix(text)
-    if delay_s:
-        asyncio.create_task(
-            send_scheduled_message(context, chat_id, msg_rel, delay_s)
-        )
-        return
-
-    # Notes
+    # --- Notes mode ---
     if notes_enabled(chat_id):
         lines = [line.strip() for line in update.message.text.splitlines() if line.strip()]
         for line in lines:
             await send_note(context, chat_id, line)
     else:
         m = await context.bot.send_message(chat_id, "I didn’t understand that. Try again.")
-        asyncio.create_task(delete_later(m.message_id))
-
-
-
+        asyncio.create_task(delete_later(m.message_id, delay=3))
 
 
 async def on_startup(app: Application):
@@ -1697,6 +1658,7 @@ app.add_handler(CommandHandler("help", help_command))
 app.add_handler(CommandHandler("timezone", timezone_command))
 app.add_handler(CommandHandler("dtz", detect_timezone_command))
 app.add_handler(CommandHandler("notes", notes_toggle_command))
+app.add_handler(CommandHandler("daily", daily_display_command))
 app.add_handler(
     CommandHandler(["reminders", "list", "upcoming"], reminders_command)
 )
