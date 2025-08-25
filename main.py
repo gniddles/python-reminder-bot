@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo, available_timezones
 import math
 
 logging.basicConfig(level=logging.INFO)
-TOKEN = "8130124634:AAGKiaDIFMVhjO2uC383hjaPwRovZUPOJRE"
+TOKEN = "8320729150:AAGC_0cFLu_EVNp7GWU3LH0WV8jDHnxLL8M"
 
 DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 daily_sent_today: set[tuple[int, int]] = set()
