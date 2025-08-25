@@ -58,7 +58,14 @@ def ensure_created_at_column():
         DB.commit()
 
 ensure_created_at_column()
-
+DB.execute("""
+CREATE TABLE IF NOT EXISTS reminders (
+    chat_id   INTEGER NOT NULL,
+    text      TEXT    NOT NULL,
+    fire_at   INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, text)
+)
+""")
 DB.execute("""
     CREATE TABLE IF NOT EXISTS users (
         chat_id INTEGER PRIMARY KEY,
@@ -1448,22 +1455,103 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # --- Full delete all ---
-    if text.lower() in {"delete all", "del all"}:
-        for message, (ts, handle) in list(reminders.get(chat_id, {}).items()):
-            if isinstance(handle, asyncio.Task):
+    if text.strip().lower() in ("del all", "delete all"):
+        # --- Delete all note messages ---
+        rows = DB.execute(
+            "SELECT message_id FROM notes WHERE chat_id=?",
+            (chat_id,)
+        ).fetchall()
+        for (mid,) in rows:
+            if mid:
                 try:
-                    handle.cancel()
-                except:
+                    await context.bot.delete_message(chat_id, mid)
+                except Exception:
                     pass
-            db_delete_reminder(chat_id, message)
-        reminders.pop(chat_id, None)
+
+        # --- Clear DB ---
         DB.execute("DELETE FROM notes WHERE chat_id=?", (chat_id,))
         DB.execute("DELETE FROM daily_reminders WHERE chat_id=?", (chat_id,))
         DB.commit()
+        reminders.pop(chat_id, None)
+
+        # --- Refresh reminder list ---
         await update_reminder_list(context, chat_id)
-        m = await context.bot.send_message(chat_id, "🗑️ Deleted everything.")
-        asyncio.create_task(delete_later(m.message_id, delay=3))
         return
+
+    
+        # --- Delete by prefix: "del <text>" / "delete <text>" ---
+    m = re.match(r'^(?:del|delete)\s+(.+)$', text.strip(), re.IGNORECASE)
+    if m:
+        query = m.group(1).strip().lower()
+        deleted_label = None
+        deleted_text = None
+
+        # 1) Try timed reminders (in-memory + DB cleanup)
+        user_rems = reminders.get(chat_id, {})
+        for key in list(user_rems.keys()):
+            if key.lower().startswith(query):
+                fire_at, handle = user_rems[key]
+                # cancel scheduled task or delete delivered message
+                try:
+                    if isinstance(handle, asyncio.Task):
+                        try:
+                            handle.cancel()
+                        except Exception:
+                            pass
+                        try:
+                            db_delete_reminder(chat_id, key)
+                        except Exception:
+                            pass
+                    elif isinstance(handle, int):
+                        try:
+                            await context.bot.delete_message(chat_id, handle)
+                        except Exception:
+                            pass
+                finally:
+                    reminders[chat_id].pop(key, None)
+                deleted_label, deleted_text = "reminder", key
+                break
+
+        # 2) Try notes
+        if not deleted_label:
+            rows = DB.execute(
+                "SELECT id, note, message_id FROM notes WHERE chat_id=? ORDER BY id",
+                (chat_id,)
+            ).fetchall()
+            for nid, note_txt, mid in rows:
+                if note_txt.lower().startswith(query):
+                    if mid:
+                        try:
+                            await context.bot.delete_message(chat_id, mid)
+                        except Exception:
+                            pass
+                    delete_note(chat_id, nid)
+                    deleted_label, deleted_text = "note", note_txt
+                    break
+
+        # 3) Try daily reminders
+        if not deleted_label:
+            rows = DB.execute(
+                "SELECT id, text FROM daily_reminders WHERE chat_id=?",
+                (chat_id,)
+            ).fetchall()
+            for did, txt in rows:
+                if txt.lower().startswith(query):
+                    delete_daily_reminder_by_id(chat_id, did)
+                    deleted_label, deleted_text = "daily", txt
+                    break
+
+        if deleted_label:
+            await update_reminder_list(context, chat_id)
+            mresp = await context.bot.send_message(
+                chat_id, f"🗑️ Deleted {deleted_label}: {deleted_text}"
+            )
+            asyncio.create_task(delete_later(mresp.message_id, delay=3))
+        else:
+            mresp = await context.bot.send_message(chat_id, "⚠️ Nothing matched to delete.")
+            asyncio.create_task(delete_later(mresp.message_id, delay=3))
+        return
+
 
     # --- Explicit timed reminders: "in 10m tea", "at 18:45 dinner", "tomorrow 09:00 call" ---
     m = re.match(r"^\s*(in\s+\d+\s*[smhd]|at\s+\d{1,2}:\d{2}|tomorrow\s+\d{1,2}:\d{2})\s+(.+)", text, re.IGNORECASE)
